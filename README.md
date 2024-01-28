@@ -10,5 +10,6 @@
 (THIS README FILE WILL CHANGE ONCE ALL THE GERAL-PURPOSE SCRIPTS ARE UPLOADED. EVERYTHING ELSE AS IS NOW)
 
 If you are the next student doing a thesis at ABG on single-cell data, feel free to contact me (https://twitter.com/H_Fotowaikha) if you need assistance with the existing code that was used for this analysis. 
-I do recommend to stay away from Seurat if you want to save yourself some sleepless nights during your thesis, as the developers love to implement meaningless updates that make your work completely incompatible with your other analysis by moving your count matrices in different layers. You can of course parse things manually, but that will take you a lot of time.
+
+I do recommend to stay away from Seurat if you want to save yourself some sleepless nights during your thesis. The developers love to implement meaningless updates that will move your count matrices in layers. You can of course parse things manually, but that will take you a lot of time.
 I recommend you to use Scanpy from the start, unless some package you need is not available in Python.
