@@ -1,0 +1,341 @@
+---
+title: "Cell-cell communcation tissue"
+output: html_notebook
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis. 
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE}
+library(dplyr)
+library(dbplyr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratData)
+library(patchwork) # Also being used for Cellchat (but main purpose was something else)
+library(hdf5r)
+library(tidyverse)
+library(gsubfn)
+library(ggplot2)
+library(RColorBrewer)
+library(writexl)
+
+# For annotation, gene name conversions
+library(rPanglaoDB)
+library(AnnotationHub)
+library(ensembldb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Ss.eg.db)
+library(DropletUtils)
+library(biomaRt)
+
+# to download external library
+library(devtools)
+
+# for Monocle3
+library(SeuratWrappers)
+library(monocle3)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork) # also used for cellchat 
+
+# co-expression network analysis packages:
+# NOTE: DOWNLAOD THE "FORTRAN compiler" on Mac systems using ARM64. This compiler is not integrated in Xcode.
+library(qlcMatrix)  
+library(impute) 
+library(preprocessCore) 
+library(WGCNA)
+library(hdWGCNA)
+
+# deconvolution
+library(Biobase) # install this package if needed (for simulated data)
+library(BisqueRNA)
+
+# Cellchat and dependencies:
+library(NMF)
+library(circlize)
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+```
+
+
+#### CellChat Organoid (move to separate R script!!!) ####
+
+
+```{r CellChat Ileum Organoid, fig.height=5, fig.width=6, echo=FALSE}
+# Finding cell to cell communication using CellChat
+
+###### PREPERATION DATA TISSUE ########
+
+#### Open the saved Seurat file with annotation information (not working with Seurat_v5)
+sobj <- LoadH5Seurat("/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum tissue/Wiarda - Ileum Tissue (non-immune)/WGCNA/ileum_pig_tiss(WIERDA).epithel.v4.WGCNA.h5seurat")
+
+#### Open the saved Seurat by renaming saven object, because we cannot use LoadH5Seurat due imcompatibility with v_5
+sobj <- sobj.tiss.all 
+Idents(sobj) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+sobj$cellID <- factor(sobj$cellID, levels = c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme")) # sort accordingly
+
+#### Update gene names to human homologs as cellchat uses human (and mouse database) 
+# Get human and pig genes
+human.genes = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/") # Dec 2021 is latest
+pig.genes = useMart("ensembl", dataset = "sscrofa_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+# Find pig Homologous genes
+annot_table <- getLDS(mart = human.genes, attributes = c('ensembl_gene_id','hgnc_symbol','external_gene_name','chromosome_name'), martL = pig.genes, attributesL = c('ensembl_gene_id','external_gene_name','chromosome_name','gene_biotype'))
+# Get the Ensembl ID to be converted to human
+ENS <- rownames(sobj@assays$RNA@features)[c(grep("ENS", rownames(sobj)))]
+# find the orthologs
+orthologs <- getLDS(attributes = c("ensembl_gene_id", "external_gene_name"), filters = "ensembl_gene_id", 
+    values = ENS, mart = pig.genes, attributesL = c("hgnc_symbol", "ensembl_gene_id"), martL = human.genes)
+# Find the positions of our Seurat ENSEMBL ids in the orthologs output
+ENSEMBL_IDs.pos <- na.omit(c(match(c(paste(ENS)), orthologs$Gene.stable.ID))) # and remove NAs (ENS with no gene IDs)
+# Now find the GeneIDs in orthologs using the ENSEMBL_IDs.pos
+geneIDs <- orthologs$HGNC.symbol[ENSEMBL_IDs.pos] 
+# Since not all ENSEMBL_IDs have true gene name, we need to find the index of geneIDs with no gene name and remove their corresponding ENSEMBL_IDs
+# To do this, we will remove genes with no names, and then find the index of these genesID in orthologs in order to find the corresponding ENSEMBL ids
+geneIDs <- as.character(geneIDs[geneIDs !=""])
+# Ensure that we don't replace ENSEMBL ids with gene names that could result in duplicates
+duplicates <- generics::intersect(geneIDs, rownames(sobj)) # find duplicated between new gene-ids with existing ones in the Seurat object
+duplicates.pos <- c(match(c(paste(duplicates)), geneIDs)) # Find position of the duplicate
+geneIDs <- geneIDs[-duplicates.pos] # and remove the duplicate
+
+geneIDs.pos <- c(match(c(paste(geneIDs)), orthologs$HGNC.symbol)) # find position of gene IDs in them
+ENSEMBL_IDs <- orthologs$Gene.stable.ID[geneIDs.pos] # find the ENSEMBL_IDs using the positions of the gene IDs
+# Now we have found all the ENSEMBL ids that have a annotated gene name (winch are also found in our Seurat object)
+# We will their final positions in our Seurat object and finally replace them with the true gene ID
+# NOTE: The order of the genes are conserved using the method above
+final.pos <- c(match(c(paste(ENSEMBL_IDs)), rownames(sobj)))
+# replace the name of that genes for all slots
+rownames(sobj@assays$RNA@features)[c(final.pos)] <- c(paste(geneIDs))
+
+
+####################### Perform CellChat afer gene name convertion
+
+
+#### Maming a CellChat object from our Seurat file
+# Take the normalized gene counts from the seurat obj
+data.input <- GetAssayData(sobj, assay = "RNA", slot = "data") 
+# Extract the metadat form seurat obj
+labels <- Idents(sobj)
+meta <- data.frame(group = labels, row.names = names(labels)) 
+# Make cellchat obj using the previous information
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "group")
+#cellChat <- createCellChat(object = sobj, group.by = "cellID", assay = "RNA") # alternative without using previous steps
+
+#### Loading in the human CellChat database for ligand-receptor interactions
+# Load Human database
+CellChatDB <- CellChatDB.human
+# Show the categories in the human database
+showDatabaseCategory(CellChatDB)
+
+#### Analysis
+# We must use either a subset of CellChatDB for cell-cell communication analysis or the full CellChatDB
+# This depends on user interest, and one example is given below with subsetting interactions related to "Secreted Signaling"
+#CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling", key = "annotation") # use Secreted Signaling only
+CellChatDB.use <- CellChatDB # Or use the default full CellChatDB
+# We now set the used database in the Cellchat object
+cellchat@DB <- CellChatDB.use
+
+# Now we will subset the expression data to only continue the analysis with the our genes that are expressed and found in the Cellchat database (DB slot). This will will also add a new slow "data.signaling" to our Cellchat object that contains the genes we use in the downstream analysis
+# This will also significantly reduce the RAM usage
+cellchat <- subsetData(cellchat) # do the subsetting as described above
+
+# Set the number of cores to be used (OPTIONAL, be careful with you computer!!!)
+#future::plan("multisession", workers = 4) 
+# Pre-processing the expression data
+cellchat <- identifyOverExpressedGenes(cellchat) # identify the over expressed genes form the genes in the "data.signaling" slot
+cellchat <- identifyOverExpressedInteractions(cellchat) # do the same for the interactions
+
+### OPTIONAL ###
+# project gene expression data onto protein-protein-interaction (Optional: when running it, USER should set `raw.use = FALSE` in the function `computeCommunProb()` in order to use the projected data)
+# This function is useful when analyzing single-cell data with shallow sequencing depth because the projection reduces the dropout effects of signaling genes, in particular for possible zero expression of subunits of ligands/receptors.
+cellchat <- projectData(cellchat, PPI.human) # this will add a new "data.project" slot
+
+# Now we will compute the communication probability and determine(estimate) cellular communication network
+# It calculates that genes must be expressed by at least 25% in each cell type. we can deviate from the default 25% by adding type = "truncatedMean" and set trim = 0.1 for 10%.
+# Parameter values are stored in "object@options$parameter"
+#cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.15) # use this code if the line above was skipped (not run by user)
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.15, raw.use = FALSE) # raw.use = FALSE to use the projected data from human PPI from the "data.project" slot
+
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+# Since we have EEC cells with n<18 in tissue and limited number of cells in tissue, we set this value to 18
+cellchat <- filterCommunication(cellchat, min.cells = 18)
+
+# Now we computes the communication probability on signaling pathway level by summarizing the communication probabilities of all ligands-receptors interactions associated with each signaling pathway.
+# The determined intercellular communication network of each ligand-receptor pair and each signaling pathway is stored in the slot "net" and "netP"
+cellchat <- computeCommunProbPathway(cellchat) # Compute the pathways found
+length(cellchat@netP[["pathways"]]) # we identified 112 pathways for ileum tissue that are significant
+cellchat@netP[["pathways"]] # to check the pathways that were found to be significant.
+
+# Now we calculate the aggregated cell-cell communication network by counting the number of links or summarizing the communication probability and visualize it in a plot. We can also only aggregate the celltypes of interest
+cellchat <- aggregateNet(cellchat) # under the Net slot, we have not calculated the weight and count of each interaction
+# The count and weights of the communications can be seen here:
+cellchat@net$count
+cellchat@net$weight
+
+# Plot aggregated cell-cell communication network showing the number of interactions or the total interaction strength (weights) between any two cell groups using circle plot.
+groupSize <- as.numeric(table(cellchat@idents)) # make the n number of cells per celltype as numeric
+
+######################### plot all interactions by weight or number for all cell types ######################### 
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "N Interactions - Ileum Tiss")
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction Strength - Ileum Tiss")
+
+######################### plot all interactions by weight (or number) for individual cell types ######################### 
+# instead of aggregated examination of cell cell communication, we can also check per celltype
+# Lets see the strength of communication per cell type by looping 
+mat <- cellchat@net$weight 
+for (i in 1:nrow(mat)) { # loop in number of rows (number of cell types)
+  mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+  mat2[i, ] <- mat[i, ]
+  netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+}
+
+# Now we want to check pathways are found by the model
+cellchat@netP$pathways
+# Now we extract and show the individual genes and ligand-receptor that are contributing to the communication network (pathways) that we previously found
+# This code is just for visualization
+extractEnrichedLR(cellchat, signaling = c(cellchat@netP [["pathways"]]), geneLR.return = TRUE) # geneLR.return = TRUE returns the genes that are ligands/receptors
+
+######################### Check some pathways and related genes out of 71 found that are related to intestine ######################### 
+# Extract and look at the genes contributing to the singnaling pathway of WNT signaling
+extractEnrichedLR(cellchat, signaling = "WNT", geneLR.return = TRUE) 
+# And look at the most contributing ligand receptor interaction of WNT signaling
+netAnalysis_contribution(cellchat, signaling = "WNT")
+# Do the same for BMP
+extractEnrichedLR(cellchat, signaling = "BMP", geneLR.return = TRUE) 
+netAnalysis_contribution(cellchat, signaling = "BMP")
+# Do the same for ncWNT
+extractEnrichedLR(cellchat, signaling = "ncWNT", geneLR.return = TRUE) 
+netAnalysis_contribution(cellchat, signaling = "ncWNT")
+# Do the same for NOTCH
+extractEnrichedLR(cellchat, signaling = "NOTCH", geneLR.return = TRUE) 
+netAnalysis_contribution(cellchat, signaling = "NOTCH")
+# Do the same for EPHA
+#extractEnrichedLR(cellchat, signaling = "EPHA", geneLR.return = TRUE) 
+#netAnalysis_contribution(cellchat, signaling = "EPHA")
+# Do the same for EPHB
+extractEnrichedLR(cellchat, signaling = "EPHB", geneLR.return = TRUE) 
+netAnalysis_contribution(cellchat, signaling = "EPHB")
+# Do the same for EGF
+extractEnrichedLR(cellchat, signaling = "EGF", geneLR.return = TRUE) 
+netAnalysis_contribution(cellchat, signaling = "EGF")
+
+
+
+###### Now lets look at individual signaling pathways and see which celltypes are involved ######
+# Now we can plot make another hierarchy plot, by choosing WNT
+pathways.show <- c("WNT")  # "NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB", "MMP"
+# Circle plot the given pathway between all cell types
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle") # "circle", "hierarchy", "chord", "spatial"
+# Now do a circle plot of the individual contributing ligand/receptor interactions
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle") 
+# Now do a circle plot of a specific ligand/receptor interaction 
+# We can do that by looking at the most contributing ligand receptor interaction first
+netAnalysis_contribution(cellchat, signaling = "WNT")
+extractEnrichedLR(cellchat, signaling = "WNT", geneLR.return = TRUE)  
+# Them plot ligand/receptor if interest
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT2B_FZD5_LRP5") # Scale image to 5 by 5
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT2B_FZD5_LRP6")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT2B_FZD1_LRP6")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT2B_FZD4_LRP6")
+###### CHORD PLOT to see interaction with cells and receptors involved ######
+# Cord plot the given patchway between all cell types
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord", )
+# Same as above
+netVisual_chord_cell(cellchat, signaling = pathways.show) # interaction with cells
+netVisual_chord_gene(cellchat, signaling = pathways.show) # interaction with cells adn receptors
+###### HEATMAP to see all signal send by the sender to receiving cells ######
+# Heatmap the given patchway between all cell types
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds", )
+###### VIOLIN to see which cells express the ligand and receptors ######
+# Make violin plot per cell type of the genes related to the given pathway
+plotGeneExpression(cellchat, signaling = pathways.show) # Scale image to 5 by 5
+
+# Now we can plot make another hierarchy plot, by choosing ncWNT
+pathways.show <- c("ncWNT")  # "NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB", "MMP"
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle") # "circle", "hierarchy", "chord", "spatial"
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle") 
+netAnalysis_contribution(cellchat, signaling = "ncWNT")
+extractEnrichedLR(cellchat, signaling = "ncWNT", geneLR.return = TRUE)  
+# Them plot ligand/receptor if interest
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT5A_FZD5") # Scale image to 5 by 5
+###### CHORD PLOT to see interaction with cells and receptors involved ######
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord", )
+netVisual_chord_cell(cellchat, signaling = pathways.show) # interaction with cells
+netVisual_chord_gene(cellchat, signaling = pathways.show) # interaction with cells adn receptors
+###### HEATMAP to see all signal send by the sender to receiving cells ######
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds", )
+###### VIOLIN to see which cells express the ligand and receptors ######
+plotGeneExpression(cellchat, signaling = pathways.show)
+
+# Now we can plot make another hierarchy plot, by choosing WNT
+pathways.show <- c("BMP")  # "NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB", "MMP"
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle") # "circle", "hierarchy", "chord", "spatial"
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle") 
+netAnalysis_contribution(cellchat, signaling = "BMP")
+extractEnrichedLR(cellchat, signaling = "BMP", geneLR.return = TRUE)  
+# Them plot ligand/receptor if interest
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP4_BMPR1A_ACVR2A") # Scale image to 5 by 5
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP4_BMPR1A_BMPR2")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP2_BMPR1A_ACVR2A")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP2_BMPR1A_BMPR2")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP2_BMPR1A_ACVR2B")
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "BMP5_BMPR1A_BMPR2")
+###### CHORD PLOT to see interaction with cells and receptors involved ######
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord", )
+netVisual_chord_cell(cellchat, signaling = pathways.show) # interaction with cells
+netVisual_chord_gene(cellchat, signaling = pathways.show) # interaction with cells and receptors
+###### HEATMAP to see all signal send by the sender to receiving cells ######
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds", )
+###### VIOLIN to see which cells express the ligand and receptors ######
+plotGeneExpression(cellchat, signaling = pathways.show) # Scale image to 6 by 5
+ 
+# Now we can plot make another hierarchy plot, by choosing WNT
+pathways.show <- c("EPHB")  # "NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB", "MMP"
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle") # "circle", "hierarchy", "chord", "spatial"
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle") 
+netAnalysis_contribution(cellchat, signaling = "EPHB")
+extractEnrichedLR(cellchat, signaling = "EPHB", geneLR.return = TRUE)  
+# Them plot ligand/receptor if interest
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "EFNB1_EPHB3", sources.use = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *'))
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "EFNB2_EPHB3", sources.use = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *'))
+###### CHORD PLOT to see interaction with cells and receptors involved ######
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord", )
+netVisual_chord_cell(cellchat, signaling = pathways.show) # interaction with cells
+netVisual_chord_gene(cellchat, signaling = pathways.show) # interaction with cells and receptors
+###### HEATMAP to see all signal send by the sender to receiving cells ######
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds", targets.use = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *') )
+###### VIOLIN to see which cells express the ligand and receptors ######
+plotGeneExpression(cellchat, signaling = pathways.show)
+
+# Now we can plot make another hierarchy plot, by choosing WNT
+pathways.show <- c("NOTCH")  # "NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB", "MMP"
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "circle") # "circle", "hierarchy", "chord", "spatial"
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle") 
+netAnalysis_contribution(cellchat, signaling = "NOTCH")
+extractEnrichedLR(cellchat, signaling = "NOTCH", geneLR.return = TRUE)  
+# Them plot ligand/receptor if interest
+netVisual_individual(cellchat, signaling = pathways.show, layout = "circle", pairLR.use = "WNT5A_FZD5")
+###### CHORD PLOT to see interaction with cells and receptors involved ######
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord", )
+netVisual_chord_cell(cellchat, signaling = pathways.show) # interaction with cells
+netVisual_chord_gene(cellchat, signaling = pathways.show) # interaction with cells and receptors
+###### HEATMAP to see all signal send by the sender to receiving cells ######
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds", targets.use = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *'), sources.use = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *'))
+###### VIOLIN to see which cells express the ligand and receptors ######
+plotGeneExpression(cellchat, signaling = pathways.show)
+
+
+
+# Compute the network centrality score
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name  = "netP")
+# Heatmap to visualize dominant cell types for each signaling pathway
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing")
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", signaling = c("ncWNT", "WNT", "BMP"), width = 4.5, height = 3, font.size = 8) # Scale image to 7 by 7
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", signaling = c("NOTCH", "EGF", "EPHB"))
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = c("ncWNT", "WNT", "BMP"), width = 4.5, height = 3, font.size = 8)
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = c("NOTCH", "EGF", "EPHB"))
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = c("BMP", "ncWNT", "WNT", "NOTCH"))
+netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", signaling = c("NOTCH", "BMP", "ncWNT", "WNT", "EPHA", "EPHB"))
+```
