@@ -7,7 +7,7 @@
 - General purpose scripts to perform the same analysis in different animal/tissue/organoid will be published on a later date (in the same repository). The chunks will be replaced with separate R scripts for every type of analysis.
 - For some analysis (WGCNA and CellChat) previous versions of Seurat has been used. These codes will be updated to be compatible with the latest version on a later date. All the other codes have been rewritten to be compatible with Seurat_v5, however you will find some lines that were used for the previous version. These lines have been greyed-out, so you can ignore them.
 
-(THIS README FILE WILL CHANGE ONCE ALL THE GERAL-PURPOSE SCRIPTS ARE UPLOADED. EVERYTHING ELSE AS IS NOW)
+(THIS README FILE WILL CHANGE ONCE ALL THE GENERAL-PURPOSE SCRIPTS ARE UPLOADED. EVERYTHING ELSE AS IS NOW)
 
 If you are the next student doing a thesis at ABG on single-cell data, feel free to contact me (https://twitter.com/H_Fotowaikha) if you need assistance with the existing code that was used for this analysis. 
 
