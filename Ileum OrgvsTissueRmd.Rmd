@@ -1,0 +1,853 @@
+---
+title: "Tissue vs Organoid Integration"
+output: tiss.vs.org_notebook
+---
+
+# In the chuck below, we load in all the essential libraaries for the data analysis. 
+```{r Load Libraries, echo=FALSE, results=FALSE}
+library(dplyr)
+library(dbplyr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratData)
+library(patchwork) # Also being used for Cellchat (but main purpose was something else)
+library(hdf5r)
+library(tidyverse)
+library(gsubfn)
+library(ggplot2)
+library(RColorBrewer)
+library(writexl)
+
+# For annotation, gene name conversions
+library(rPanglaoDB)
+library(AnnotationHub)
+library(ensembldb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Ss.eg.db)
+library(DropletUtils)
+library(biomaRt)
+
+# to download external library
+library(devtools)
+
+# for Monocle3
+library(SeuratWrappers)
+library(monocle3)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork) # also used for cellchat 
+
+# co-expression network analysis packages:
+# NOTE: DOWNLAOD THE "FORTRAN compiler" on Mac systems using ARM64. This compiler is not integrated in Xcode.
+library(qlcMatrix)  
+library(impute) 
+library(preprocessCore) 
+library(WGCNA)
+library(hdWGCNA)
+
+# deconvolution
+library(Biobase) # install this package if needed (for simulated data)
+library(BisqueRNA)
+
+# Cellchat and dependencies:
+library(NMF)
+library(circlize)
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+```
+
+
+######################################### Porcine Ileum Tissue vs Organoid (Integration) #########################################
+
+
+
+#################### Opening the files ####################
+
+```{r, opening the Seurat object, echo=FALSE}
+parent_directory = "/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Annotaded Seurat objects"
+parent_directory1 = "/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)"
+sample_names = c("ileum_Organoid", "ileum_Tissue")
+project_name = "Porcine Ileum Organoid vs Tissue"
+
+##### Alternative, because we cannot open and save Seurat_v5 files. an update is needed for LoadH5Seurat package ######
+
+#### NEW Seurat v5 Method ####
+# Let make second packups
+sobj.org <- sobj1
+sobj.org.noSecProg <- sobj1.1
+sobj.tiss.all <- sobj3
+sobj.tiss.epit <- sobj2
+
+sobj <- sobj.tiss.epit
+
+# Merge the Seurat objects that we will integrate later on
+org.tiss.combined <- merge(x= sobj.org, y=sobj.tiss.epit)
+
+gc(reset = TRUE) # clean memory
+
+#### OLD Seurat v4 Method ####
+# Find Seurat file names
+#sob_names <- list.files(parent_directory, pattern=NULL, all.files=FALSE, full.names=FALSE)
+#sob_names
+
+# Opening the Seurat objects and putting them in a vector
+#sobj_list <- list() # make empty list to append Seurat Objects in the loop below
+#for (i in 1:length(x = sob_names)) {  # we loop in range of sob_names, because that determine the number of replicates we have
+#  name <- paste('', sob_names[i], sep='') # name the objects in list
+#  sobj_list[name] <- LoadH5Seurat(paste(sob_names[i])) # append the Seurat objects in a list of Seurat Objects
+#}
+```
+
+
+
+######################################### CPM normalization, Finding most variable genes and Scaling #########################################
+
+
+
+#################### CPM normalization ####################
+
+# In order to compare the gene expression between different cells, we need to normalize the data.
+# The main assumption here is that the majority of cells have the same number of mRNA molecules (in proportion)
+# We log transform them so that the bigger values do not dominate over smaller one
+```{r cpm normalization, echo=FALSE, results='hide'}
+#### NEW Seurat v5 Method ####
+# Applies a CPM-log(10.000) normalization on the count matrix
+org.tiss.combined <- NormalizeData(org.tiss.combined, normalization.method = "LogNormalize", scale.factor = 10000)
+
+
+#### OLD Seurat v4 Method ####
+# // This function returns applies a CPM-log(10.000) normalization on the count matrix for each object
+# // Input file must be a vector of Seurat objects
+#CPM_norm <- function(sobj) {
+#  sobj <- NormalizeData(sobj, normalization.method = "LogNormalize", scale.factor = 10000)
+#  return(sobj)
+#}
+# Execute CPM_norm function
+#sobj_list <- sapply(sobj_list, CPM_norm)
+```
+
+
+#################### Finding most variable genes and select integration features ####################
+
+# Here we will select the highy variable genes that will be used fro RPCA or CCA.
+# The reason we want to do this is present the genes that do not represent house-keeping genes that have same expression accorss diffeent cells. In short, we are looking for genes that casue variability in the data (highly expressen in some cells and low expressen in others). By doing so we also make the signal stronger if we want to see the differene between cell to cell.
+# One aprouch to calculate the highly variable genes is by calculation the stdv/mean-count. So genes with low expression will have large variance when compared to highyl expressed genes.
+# Since we have previouse used 3000 nfeatures for both Tissue and Organoid, we will proceed to use the same amount here.
+```{r show most variable genes, fig.height=5, fig.width=8, echo=FALSE, results='hide'}
+#### NEW Seurat v5 Method ####
+org.tiss.combined <- FindVariableFeatures(org.tiss.combined, selection.method = "vst", nfeatures = 3000) # if include all genes
+
+#### OLD Seurat v4 Method ####
+# // This function calculates, plots and returns the top 3000 most variable genes based on the standardized variance
+# // Input file must be a vector of Seurat objects
+#most_var_genes <- function(sobj) {
+#  sobj <- FindVariableFeatures(sobj, selection.method = "vst", nfeatures = 2000) #### AOTOMATE THE NUMBER OF VARIABLES
+#  return(sobj)
+#}
+# Execute most_var_genes function
+#sobj_list <- sapply(sobj_list, most_var_genes)
+
+# Now we select features that are repeatedly variable across datasets for integration
+
+# Gene selection for input to CCA:
+# take the names of the higly variable genes for each Seurat object
+#g.1 <- head(rownames(HVFInfo(object = sobj_list[[1]])), 3000)
+#g.2 <- head(rownames(HVFInfo(object = sobj_list[[2]])), 3000)
+# Remove duplicate by taking unique ones of the two
+#highly_variable_feautures <- unique(c(g.1, g.2))
+#highly_variable_feautures <- intersect(highly_variable_feautures, rownames(GetAssayData(object = sobj_list[[1]], slot = "scale.data")))
+#highly_variable_feautures <- intersect(highly_variable_feautures, rownames(GetAssayData(object = sobj_list[[2]], slot = "scale.data")))
+
+# The features for RPCA
+#highly_variable_feautures <- SelectIntegrationFeatures(object.list = sobj_list, nfeatures = 2000)
+```
+
+
+#################### Scaling (optional, as scaling has been done before) #################### SKIP FOR CCA
+
+# Here we will scale the data to make the genes the same as the other genes.
+# Scaling is done on genes that are interesting (by this we mean the highly variable genes, becaue these highy variable genes needs to scaled)
+Next, we apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA.
+- The sclaing is done as follows:
+* Shifts the expression of each gene, so that the mean expression across cells is 0
+* Scales the expression of each gene, so that the variance across cells is 1
+    + This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate
+* The results of this are stored in ....[["RNA"]]@scale.data
+```{r scaling of the data, results='hide', fig.height=10, fig.width=7}
+#### NEW Seurat v5 Method ####
+all.genes.sobj <- rownames(org.tiss.combined)
+org.tiss.combined <- ScaleData(org.tiss.combined, features = all.genes.sobj) 
+
+
+#### OLD Seurat v4 Method ####
+# // This function shifts the expression of each gene, so that the mean expression across cells is 0 
+# // This functions scales the expression of each gene, so that the variance across cells is 1
+# // The funtion returns the sclaed results to object@scale.data for each Seurat object
+# // Input file must be a vector of Seurat objects
+#scaling <- function(sobj) {
+#  all.genes.sobj <- rownames(sobj)
+#  sobj <- ScaleData(sobj, features = all.genes.sobj) 
+#  return(sobj)
+#}
+# Execute scaling function
+#sobj_list <- sapply(sobj_list, scaling)
+```
+
+
+#################### PCA (optional, to find optimal dims for RPCA or CCA) #################### 
+
+# Here, we carrie out  linear dimensional reduction using PCA on the scaled data containing the most variable genes.
+# The reason that we do a PCA is because we want to potential din the optimal number of dimensions that will be used for the integration anchoring in RPCA or CCA. 
+```{r scaling and PCA, results='hide', fig.height=4, fig.width=8}
+#### NEW Seurat v5 Method ####
+# PCA using selected features
+org.tiss.combined <- RunPCA(org.tiss.combined, features = VariableFeatures(object = org.tiss.combined)) 
+
+
+#### OLD Seurat v4 Method ####
+# // This function runs a PCA on the 2500 most variable each Seaurat object 
+# // By default up to 100 PCs are calculated
+# // Input file must be a vector of Seurat objects
+#run_PCA <- function(sobj) {
+#  sobj <- RunPCA(sobj, features = VariableFeatures(object = sobj))
+#  return(sobj)
+#}
+# Execute run_PCA function
+#sobj_list <- sapply(sobj_list, run_PCA)
+
+# // This function calculates returns the optimal number of PCs for clustering.
+# // Method1: last PC where change in percent variation is more than 0.5%
+# // Method2: PCs representing cumulative percent >90% and less than 5% associated with the single PC
+# // Input file must be a vector of Seurat objects
+#optimal_PCs <- function(sobj) {
+#  pc.stdev.percentage <- sobj[["pca"]]@stdev / sum(sobj[["pca"]]@stdev) * 100 # find standard deviation for each PC
+#  cumu.percentage <- cumsum(pc.stdev.percentage) # find cumulative percentages for PCs
+#  co1 <- which(cumu.percentage > 90 & pc.stdev.percentage < 5)[1] # find PCs representing cumulative percent >90% and less than 5% associated with the single PC
+#  co1 # list PC
+#  co2 <- sort(which((pc.stdev.percentage[1:length(pc.stdev.percentage) - 1] - pc.stdev.percentage[2:length(pc.stdev.percentage)]) > 0.05), decreasing = T)[1]  # find last PC where change in percent variation is more than 0.5%
+#  co2 # list PC
+#  pcs <- min(co1, co2) # find the minimum PC from the 2 methods used above
+#  pcs < max(pcs) # list P
+#  pc.dims <- 1:pcs # we will use these dimenion later on
+  
+#  plot_df <- data.frame(pc.stdev.percentage = pc.stdev.percentage, # put PC values into dataframe for plotting
+#                      cumu = cumu.percentage, 
+#                      rank = 1:length(pc.stdev.percentage))
+  
+#  opt_PC_plot <- ggplot(plot_df, aes(cumu.percentage, pc.stdev.percentage, label = rank, color = rank > pcs)) + 
+#    geom_text() + geom_vline(xintercept = 90, color = "grey") + 
+#    geom_hline(yintercept = min(pc.stdev.percentage[pc.stdev.percentage > 5]), color = "grey") + theme_bw() # visualize PCs to use in elbow plot
+#  print(opt_PC_plot)
+  
+#  return(list(pc.dims))
+#}
+# Execute optimal_PC function
+#pc.dims <- sapply(sobj_list, optimal_PCs)
+
+# Plot an Eblow to visualize the optimal PCs
+#for (i in 1:length(x = pc.dims)) {
+#  e1 <- ElbowPlot(sobj_list[[i]], ndims = 40) + 
+#    ggtitle(paste("Elbow Plot - Most Significant PCs", sobj_list[[i]]@meta.data$cell.origin[1], sep = " - ")) + 
+#    geom_vline(xintercept = max(unlist(pc.dims[[i]])), linetype="dashed", color = "red", size=1)
+#  print(e1) ####### SAVE FOR PIPELINE
+#}
+
+# Find the lowest PC dim from a list of PC.dims that can be used for RPCA/CCA
+#dims <- 0
+#for (i in 1:length(x = pc.dims)) {
+#  dims[i] <- max(pc.dims[[i]])
+#}
+#dims <- 1:min(dims) # final number of dims
+```
+
+
+
+######################################### RPCA (or CCA) Integration procedure #########################################
+
+
+#################### RPCA #################### 
+
+# In the chuck below we identify anchors using the FindIntegrationAnchors() or IntegrateLayers() function, which takes our list of Seurat objects as input, and use these anchors to integrate the two datasets together with IntegrateData().
+# Since we have already sclaled our data, we od not have to do it again, see sclaing method in previous codes
+```{r Perform RPCA integration, echo=FALSE}
+#### NEW Seurat v5 Method ####
+# Find optimal number of dimensions (from PCA)
+pc.stdev.percentage <- org.tiss.combined[["pca"]]@stdev / sum(org.tiss.combined[["pca"]]@stdev) * 100 
+cumu.percentage <- cumsum(pc.stdev.percentage) 
+co1 <- which(cumu.percentage > 90 & pc.stdev.percentage < 5)[1] 
+co2 <- sort(which((pc.stdev.percentage[1:length(pc.stdev.percentage) - 1] - pc.stdev.percentage[2:length(pc.stdev.percentage)]) > 0.01), decreasing = T)[1]  
+pcs <- min(co1, co2) 
+pc.dims <- 1:pcs 
+# Elbow plot the optimal PC dimension
+ElbowPlot(org.tiss.combined, ndims = 50) + ggtitle(paste("Elbow Plot - Most Significant PCs")) + 
+  geom_vline(xintercept = max(pc.dims), linetype="dashed", color = "red", size=1)
+# Perform an RPCA anchored integration
+# // k.anchor =  number of neighbors to use when picking anchors (default = 5 in Seurat v4)
+# // k.weight = number of neighbors to consider when weighting anchors (default = 100 in Seurat v4)
+# // dims = number of dimensions to use in the anchor weighting procedure (default = 1:30 in Seurat v4)
+org.tiss.combined <- IntegrateLayers(object = org.tiss.combined, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca", verbose = FALSE, k.anchor = 5, k.weight = 100, dims = pc.dims)  # try k.weight = 105 like previous SeuratV4
+
+#### OLD Seurat v4 Method ####
+# find anchors rPCA
+#find.anchors <- FindIntegrationAnchors(object.list = sobj_list, anchor.features = highly_variable_feautures, reduction = "rpca",)
+# Now we creates the 'integrated' data assay
+#org.tiss.combined <- IntegrateData(anchorset = find.anchors, k.weight = 105)
+
+# find anchors CCA
+#find.anchors <- FindIntegrationAnchors(object.list = sobj_list, anchor.features = highly_variable_feautures, reduction = "cca", dims = 1:30)
+# Now we creates the 'integrated' data assay
+#org.tiss.combined <- IntegrateData(anchorset = find.anchors, dims = 1:30)
+```
+
+
+
+#################### Standard Workflow on Integrated dataset ####################
+
+
+
+# In the chuck below we will apply the our previous workflow starting with the normalization, feauture selection, sclaing, PCA, clustering and DGE analysis
+# For the clustering, we will analyze all clusters manually and select the best.
+```{r applying workflow on filtered data, fig.height=4, fig.width=5, echo=FALSE}
+#### NEW Seurat v5 Method ####
+# Nowrun the UMAP clustering
+org.tiss.combined <- FindNeighbors(org.tiss.combined, reduction = "integrated.rpca", dims = pc.dims, )
+#org.tiss.combined <- FindClusters(org.tiss.combined, resolution = 1.5, cluster.name = "rpca_clusters")
+org.tiss.combined <- RunUMAP(org.tiss.combined, reduction = "integrated.rpca", dims = pc.dims, reduction.name = "umap.rpca")
+
+# re-join layers after integration
+org.tiss.combined[["RNA"]] <- JoinLayers(org.tiss.combined[["RNA"]])
+
+
+
+
+#### OLD Seurat v4 Method ####
+# Scale the data
+#####org.tiss.combined <- NormalizeData(object = org.tiss.combined, assay = "RNA") #### DO not run this code, this is only for test
+#all.genes.org.tiss.combined <- rownames(org.tiss.combined)
+#org.tiss.combined <- ScaleData(org.tiss.combined, features = all.genes.org.tiss.combined) 
+# PCA using selected features
+#org.tiss.combined <- RunPCA(org.tiss.combined, features = VariableFeatures(object = org.tiss.combined)) 
+#pc.stdev.percentage <- org.tiss.combined[["pca"]]@stdev / sum(org.tiss.combined[["pca"]]@stdev) * 100 
+#cumu.percentage <- cumsum(pc.stdev.percentage) 
+#co1 <- which(cumu.percentage > 90 & pc.stdev.percentage < 5)[1] 
+#co2 <- sort(which((pc.stdev.percentage[1:length(pc.stdev.percentage) - 1] - pc.stdev.percentage[2:length(pc.stdev.percentage)]) > 0.05), decreasing = T)[1]  
+#pcs <- min(co1, co2) 
+#pc.dims <- 1:pcs # This (13) is the optimal PC for Orgnaoid
+
+# UMAP/T-SNE clustering
+#org.tiss.combined <- RunUMAP(org.tiss.combined, dims = pc.dims) # UMAP
+```
+
+
+
+#################### Visualization ####################
+
+
+
+# In the chuck below, we visualize the difference between ileum tissue and organoid
+```{r final cluster, fig.height=4, fig.width=5, echo=FALSE} 
+# visualization of difference between organoid vs tissue
+DimPlot(org.tiss.combined, reduction = "umap.rpca", label = FALSE, pt.size = 0.3, group.by = 'cell.origin', cols = c('Ileum Org' = 'lightgreen', 'Ileum Tiss' = 'darkmagenta')) + ggtitle(project_name, subtitle = paste("RPCA Integrated Clustering (n = ", paste(dim(org.tiss.combined)[2], ")", sep = ""))) + ylab("UMAP 1") + xlab("UMAP 2")
+
+# with annotation information of both tissue and organoid
+DimPlot(org.tiss.combined, reduction = "umap.rpca", label = TRUE, pt.size = 0.3, group.by = 'cellID', label.size = 1.5) + ggtitle(project_name, subtitle = paste("RPCA Integrated Clustering (n = ", paste(dim(org.tiss.combined)[2], ")", sep = ""))) + ylab("UMAP 1") + xlab("UMAP 2") + NoLegend()
+```
+
+# In the chuck below, we choose we visualize the subsets of secretory cells that are somewhat similair
+```{r final cluster, fig.height=5, fig.width=8, echo=FALSE} 
+#### NEW Seurat v5 Method ####
+# subset of Goblet, Panneth/goblet early, and goblet organoid
+DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "Secretory Prog"], group.by = 'cellID', pt.size = 1.2, cols = c('GC' = 'pink', 'PC' = 'darkmagenta', 'EEC' = 'magenta', "Secretory Prog" = "lightblue"))
+
+# Subset of secretory in tissue vs organoid
+DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "Secretory Prog" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "EEC *" | org.tiss.combined$cellID == "TC *"], group.by = 'cellID', pt.size = 0.6, cols = c('GC' = 'cyan', 'PC' = 'gold2', 'Secretory Prog' = 'red2', "EEC" = "lightgreen", 'GC *' = 'purple', 'PC *' = 'pink1', "EEC *" = "darkmagenta", "TC *" = "magenta"))
+
+# highlighting cells of interest
+DimPlot(object = org.tiss.combined[,org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "Secretory Prog" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "EEC *"], cells.highlight = c("ACGTCCTAGCACCTGC-1_1", "CTTCAATCAGGAGACT-1_2", "TCACGGGAGTCCCAGC-1_2", "TCGTAGAAGACTTCAC-1_2"), cols.highlight = "red", cols = "gray", order = TRUE)
+
+
+#### OLD Seurat v4 Method ####
+# subset of Goblet, Panneth/goblet early, and goblet organoid
+#DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "Goblet Cells" | org.tiss.combined$cellID == "Panneth Cells" | org.tiss.combined$cellID == "Secretory Cells (Goblet/Enteroendocrine)" | org.tiss.combined$cellID == "Enteroendocrine Cells"], group.by = 'cellID', #pt.size = 1.2, cols = c('Goblet Cells' = 'pink', 'Panneth Cells' = 'darkmagenta', 'Secretory Cells (Goblet/Enteroendocrine)' = 'magenta', "Enteroendocrine Cells" = "lightblue"))
+
+#DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "Goblet Cells" | org.tiss.combined$cellID == "Paneth Cells" | org.tiss.combined$cellID == "Secretory Cells (Goblet/Enteroendocrine/Paneth)" | org.tiss.combined$cellID == "Enteroendocrine Cells" | org.tiss.combined$cellID == "Goblet Cells *" | org.tiss.combined$cellID == "Paneth Cells *" | org.tiss.combined$cellID == "Enteroendocrine Cells *"], group.by = 'cellID', pt.size = 1.2, cols = c('Goblet Cells' = 'pink', 'Paneth Cells' = 'darkmagenta', 'Secretory Cells (Goblet/Enteroendocrine/Paneth)' = 'magenta', "Enteroendocrine Cells" = "gold2", 'Goblet Cells *' = 'pink4', 'Paneth Cells *' = 'red3', "Enteroendocrine Cells *" = "lightblue4"))
+
+# highlighting cells of interest
+#DimPlot(object = org.tiss.combined[,org.tiss.combined$cellID == "Goblet Cells" | org.tiss.combined$cellID == "Paneth Cells" | org.tiss.combined$cellID == "Secretory Cells (Goblet/Enteroendocrine/Paneth)" | org.tiss.combined$cellID == "Enteroendocrine Cells" | org.tiss.combined$cellID == "Goblet Cells *" | org.tiss.combined$cellID == "Paneth Cells *" | org.tiss.combined$cellID == "Enteroendocrine Cells *"], cells.highlight = c("ACGTCCTAGCACCTGC-1_1", "CTTCAATCAGGAGACT-1_2", "TCACGGGAGTCCCAGC-1_2", "TCGTAGAAGACTTCAC-1_2"), cols.highlight = "red", cols = "gray", order = TRUE)
+```
+
+# In the chuck below, we choose we visualize the subsets of stem cells that are somewhat similair
+```{r final cluster, fig.height=5, fig.width=8, echo=FALSE} 
+#### NEW Seurat v5 Method ####
+# subset of Stem/Prog, Prolif progy, and organoid semi-prolif stem/prog
+DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "Prolific Stem/Prog *" | org.tiss.combined$cellID == "EC Prog *" | org.tiss.combined$cellID == "Prolific Stem/Prog" | org.tiss.combined$cellID == "Early EC Prog" | org.tiss.combined$cellID == "Prolific TAC" | org.tiss.combined$cellID == "TAC"], group.by = 'cellID', pt.size = 0.6, cols = c('Prolific Stem/Prog *' = 'purple', 'EC Prog *' = 'pink1', 'Prolific Stem/Prog' = 'gold', "Early EC Prog" = "lightgreen", "Prolific TAC" = "cyan", "TAC" = "cyan4"))
+
+#### OLD Seurat v4 Method ####
+# subset of Stem/Prog, Prolif progy, and organoid semi-prolif stem/prog
+#DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "Prolif Prog Cells *" | org.tiss.combined$cellID == "Stem Cells *" | org.tiss.combined$cellID == "Semi-Prolif Stem/Prog Cells"], group.by = 'cellID', pt.size = 0.1, cols = c('Prolif Prog Cells *' = 'gold2', 'Stem Cells *' = 'darkmagenta', 'Semi-Prolif Stem/Prog Cells' = 'magenta'))
+```
+
+# In the chuck below, we choose we visualize the subsets of Enterocytes that are somewhat similair
+```{r final cluster, fig.height=5, fig.width=8, echo=FALSE} 
+#### NEW Seurat v5 Method ####
+# subset of Stem/Prog, Prolif progy, and organoid semi-prolif stem/prog
+DimPlot(org.tiss.combined[,org.tiss.combined$cellID == "Early Immature EC" | org.tiss.combined$cellID == "Late Immature EC" | org.tiss.combined$cellID == "Migrating EC (Villous Tips)" | org.tiss.combined$cellID == "Semi-Mature EC" | org.tiss.combined$cellID == "Early EC *" | org.tiss.combined$cellID == "Late EC *" | org.tiss.combined$cellID == "Developing EC *"], group.by = 'cellID', pt.size = 0.6, cols = c('Early Immature EC' = 'gold', 'Late Immature EC' = 'cyan4', 'Migrating EC (Villous Tips)' = 'lightgreen', "Semi-Mature EC" = "cyan", "Early EC *" = "pink1", "Late EC *" = "purple", "Developing EC *" = "darkmagenta" ))
+
+#### NO Seurat v4 Method here, as it was added later ####
+```
+
+# In the chuck below we make heatmaps of celltypes that are shared between the organoid and tissue, we also include enterocyted to show the difference bweteen the two samples.
+# It appears that the Enterocytes in tissue express genes related to nutition absobtion, and these genes are reraly expressed in Organoid epothelial cells
+# Note that we also make plots here for CellChat and hdWGCNA
+```{r dotplot expression, echo=FALSE,  fig.height=3, fig.width=5}
+# fig.height=2.3, fig.width=10
+
+#### NEW Seurat v5 Method ####
+Idents(org.tiss.combined) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+org.tiss.combined <- NormalizeData(object = org.tiss.combined, assay = "RNA")
+org.tiss.combined@assays[["RNA"]]@layers[["scale.data"]] <- NULL
+org.tiss.combined <- ScaleData(org.tiss.combined, verbose = FALSE, assay="RNA", features = rownames(org.tiss.combined)) # Scale all genes, because now we want look at all of them in the heatmaps or dotplots
+DefaultAssay(org.tiss.combined) <- "RNA" # Set "RNA" slot as default assay
+
+
+# Stem/Prog cells similarity plots/heatmaps
+# DOTPLOT
+pic1 <- org.tiss.combined
+stem.prog_markers <- c("OLFM4" ,"SOX9", "CDCA7", "CENPF", "HMGB2", "TPX2", "UBE2C", "BNIP3", "TOP2A", "MKI67", "ASCL2", "EPHB2", "LGR5", 'OCT4', 'NANOG', 'SOX2', 'KLF4' )
+DotPlot(pic1[,pic1$cellID == "Prolific Stem/Prog *" | pic1$cellID == "Prolific TAC" | pic1$cellID == "EC Prog *" | pic1$cellID == "Prolific Stem/Prog"], features = stem.prog_markers, cols = c("blue", "red", "green"), split.by = "cell.origin", assay = "RNA") + RotatedAxis()
+# HEATMAP
+# desired order
+pic1$cellID <- factor(pic1$cellID, levels = c("Prolific Stem/Prog", "Prolific TAC", "Prolific Stem/Prog *", "EC Prog *"))
+# plot heatmap
+DoHeatmap(subset(pic1[,pic1$cellID == "Prolific Stem/Prog" | pic1$cellID == "Prolific TAC" | pic1$cellID == "Prolific Stem/Prog *" | pic1$cellID == "EC Prog *"], downsample = 200), features = stem.prog_markers, assay = "RNA", label = FALSE, group.by = 'cellID') + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red", "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) #+ NoLegend()
+
+####### TEST ####### SCLAE.DATA REMOVES GENES (SOX9), FIX THIS PROBLEM!!!!!!!!
+#DoHeatmap(subset(pic1[,pic1$cellID == "Prolif Prog Cells" | pic1$cellID == "Prolif Prog Cells *" | pic1$cellID == "Stem Cells *"], downsample = 200), features = stem.prog_markers, label = FALSE, group.by = 'cellID') + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red")) #+ NoLegend()
+
+# Secretory cells similarity plots/heatmaps
+# DOTPLOT
+pic2 <- org.tiss.combined
+Gob.Pann.Endo_markers <- c("NEUROG3", "NEUROD1", "CHGA", "CHGB", "PENK", "PAX4", "PYY", "CPE", "GCG", "TFF3", "REG4", "SPINK4", "MUC2", "CLCA1", "LYZ", "PIGR", "SPINK1", "C3", "RETNLB", "CA8", "FCN2", "OLFM4", "UBE2C", "GFI1")
+DotPlot(pic2[,pic2$cellID == "GC" | pic2$cellID == "PC" | pic2$cellID == "Secretory Prog" | pic2$cellID == "EEC" | pic2$cellID == "GC *" | pic2$cellID == "PC *" | pic2$cellID == "EEC *"], features = Gob.Pann.Endo_markers, cols = c("blue", "red", "green"), split.by = "cell.origin",  col.min = -2.5, col.max = 2.5, scale = T, assay = "RNA") + RotatedAxis()
+# HEATMAP
+# desired order
+pic2$cellID <- factor(pic2$cellID, levels = c("Secretory Prog", "GC", "PC", "EEC", "GC *", "PC *", "EEC *"))
+# plot heatmap
+DoHeatmap(subset(pic2[,pic2$cellID == "GC" | pic2$cellID == "PC" | pic2$cellID == "Secretory Prog" | pic2$cellID == "EEC" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "EEC *"], downsample = 200), features = Gob.Pann.Endo_markers, assay = "RNA", label = FALSE, group.by = 'cellID', slot = "scale.data") + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red", "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) #+ NoLegend()
+
+# Nutrition absorbing Enterocytes
+# DOTPLOT
+pic3 <- org.tiss.combined
+enterocyte.absorbtion_markers <- c("FABP1", "FABP2", "FABP6", "APOA1", "APOA4", "ACE2", "SI", "ALDOB", "SLC5A12", "SLC1A1", "SLC5A1", "SLC51A", "SLC7A9") # some
+enterocyte.absorbtion_markers <- c("SLC2A2", "SLC2A5", 'SLC2A6', "SLC2A7", "SLC5A1", "SLC5A6", "SLC5A8",      "SLC5A12", "SLC1A1", "SLC3A1", "SLC3A2", "SLC7A7", "SLC7A9",      "SLC6A4", "SLC6A6", 'SLC6A8', 'SLC6A19', 'SLC6A20', "SLC43A2",      'SLC28A1' , 'SLC28A2',       'SLC9A2', 'SLC9A6', 'SLC26A2', 'SLC26A3', 'SLC26A6', "SLC15A1",      "SLC13A1",      'SLC16A1', 'SLC16A5',       "SLC20A1",      "SLC34A3",      'SLC30A1', 'SLC30A4', 'SLC30A5', 'SLC30A10', 'SLC31A1', 'SLC39A1', 'SLC39A4', 'SLC39A5',      'SLC10A2', 'SLC51A',       'SLC27A2', 'SLC27A4', 'FABP1', 'FABP2', 'FABP6', 'RBP2',      "LPL", "OTC", "SERHL2", "S100G", "SORD", "AGPS", "IDH3B", "GALM",      "MGAM", "ANPEP", "SDSL", "AKR1E2", "DHDH", "ASS1", "FBP1", "FBP2", "APOA1", "APOA4", "ACE2", "SI", "ALDOB") # all
+DotPlot(pic3[,pic3$cellID == "Early Immature EC" | pic3$cellID == "Late Immature EC" | pic3$cellID == "Semi-Mature EC" | pic3$cellID == "Migrating EC (Villous Tips)" | pic3$cellID == "Developing EC *" | pic3$cellID == "Early EC *" | pic3$cellID == "Late EC *"], features = enterocyte.absorbtion_markers, cols = c("blue", "red", "green"), split.by = "cell.origin",  col.min = -2.5, col.max = 2.5, scale = T, assay = "RNA") + RotatedAxis()
+# HEATMAP
+# desired order
+pic3$cellID <- factor(pic3$cellID, levels = c('Early Immature EC', 'Late Immature EC', 'Semi-Mature EC', 'Developing EC *', 'Early EC *', 'Late EC *'))
+# plot heatmap
+DoHeatmap(subset(pic3[,pic3$cellID == "Early Immature EC" | pic3$cellID == "Late Immature EC" | pic3$cellID == "Semi-Mature EC" | pic3$cellID == "Developing EC *" | pic3$cellID == "Early EC *" | pic3$cellID == "Late EC *"], downsample = 200), features = enterocyte.absorbtion_markers, assay = "RNA", label = FALSE, group.by = 'cellID', slot = "scale.data") + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red","red", "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) #+ NoLegend()
+
+
+################ FOR WGCNA ##############
+# WGCNA transcription factors
+pic4 <- org.tiss.combined # make new Seurat object to look for TFs
+# Make a vector of all transcription factors found markers
+load(file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum tissue/Wiarda - Ileum Tissue (non-immune)/WGCNA/Hub TFs/Hub_Transcription_Factors")
+TF.per.module
+# Put the TFs in order of module in a vector
+TF.genes <- c(TF.per.module$`Ileum-M1`$Symbol, TF.per.module$`Ileum-M2`$Symbol, TF.per.module$`Ileum-M3`$Symbol, TF.per.module$`Ileum-M4`$Symbol, TF.per.module$`Ileum-M5`$Symbol, TF.per.module$`Ileum-M6`$Symbol, TF.per.module$`Ileum-M7`$Symbol, TF.per.module$`Ileum-M8`$Symbol, TF.per.module$`Ileum-M9`$Symbol)
+# collect the TFs per module 
+TF.genes.M1 <- c("MEF2B", "CREM", "ETS1", "ZNF70") # Tuft trajectory, missing in org cells
+TF.genes.M2 <- c("CREB3", "TOX4", "CEBPG", "ID4", "OVOL1", "LITAF", "CSRNP1", "DDIT3", "JARID2", "IRF1", "TMF1", "KLF3", "ID1", "ATF4", "XBP1", "ID3", "EGR1", "HES2", "MXD1", "CREB3L4", "NR4A1", "KLF4", "FOS", "ELF3", "TSC22D1", "CEBPB", "ATF3", "CREB3L1", "FOXA3", "SPDEF") # Panteh and Goblet Tuft trajectory, but goed into the ECs in organoid
+TF.genes.M3 <- c('NME1l') # Appear to be expressed in stem/progs in both Org and Tissue, not much difference
+TF.genes.M4 <- c('NFE2L2') # Elevated in EC progs in developing ECs in both org and tissue, while dropping off in late ECs in ORG while maintained in Tiss ECs
+TF.genes.M5 <- c("HNF4G", "MAF", "NR1H4") # servey lacking in ORG ECs, and highly enriched in Tiss ECs. might be related to EC maturation
+TF.genes.M6 <- c("NFIL3", "TOX", "ETV1", "FOXN3", "PITX2", "MLXIPL", "ZKSCAN1", "HES6", "MTA1", "DACH1", "HOXB8", "CARHSP1") # shares similar profile in both Org and Tiss towards the EEC trjactroy
+TF.genes.M7 <- c("PARP12", "IRF3", "CDX2", "TCF7L2", "ZNFX1", "ETV3", "ZBTB7B", "ID2") # seems a lot are missing in the late ECs and GC in organoid. highly enriched din tissue GC and ECs
+TF.genes.M8 <- c("MYBL2", "ZNF367", "E2F8", "LYAR", "HMGB2") # similar between org and tiss and enriched in ealry stem/prog/tac cells
+TF.genes.M9 <- c("THAP11", "RELA", "CDC5L") # 
+
+# desired order for cells
+pic4$cellID <- factor(pic4$cellID, levels = c('Prolific Stem/Prog', 'Prolific TAC', 'TAC', 'Early EC Prog', 'Late EC Prog', "PC", "GC", "EEC", 'Renewing EC', 'Developing EC', 'Undeveloped EC', 'Early Immature EC', 'Late Immature EC', 'Migrating EC (Villous Tips)', 'Semi-Mature EC', 'Resting Cells', 'Prolific Stem/Prog *', 'EC Prog *', 'PC *', 'GC *', 'EEC *', 'TC *', 'Developing EC *', 'Early EC *', 'Late EC *'))
+
+# DOTPLOT
+# Make dotplot of TFs per module manually. We don't loop here because the images don't scale well
+DotPlot(pic4, features = TF.genes.M1, assay = "RNA", scale = T, scale.by = 'size', group.by = "cellID") + 
+  scale_colour_gradient2(low = "blue", mid = "white", high = "red") + 
+  RotatedAxis() + coord_flip() +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.7) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black")) + 
+  theme(axis.text.y = element_text(face = 'italic'))
+# HEATMAP
+# Make heatmap of TFs
+DoHeatmap(subset(pic4, downsample = 200), features = TF.genes, assay = "RNA", label = FALSE, group.by = 'cellID', slot = "scale.data") + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red",  "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) + NoLegend()
+
+
+################ FOR CELLCHAT ##############
+pic5 <- subset(org.tiss.combined, idents = c("Prolific Stem/Prog", "Prolific TAC", 'Early EC Prog', 'Late EC Prog', "PC", "Prolific Stem/Prog *", 'EC Prog *', 'PC *'))  # make new Seurat object to look for at OLFM4 and SOX9 (WNT signal)
+# desired order for cells
+pic5$cellID <- factor(pic5$cellID, levels = c("Prolific Stem/Prog", "Prolific TAC", 'Early EC Prog', 'Late EC Prog', "PC", "Prolific Stem/Prog *", 'EC Prog *', 'PC *'))
+# pick genes to check
+stem.prog_markers <- c("OLFM4" ,"SOX9")
+# plot heatmap
+DoHeatmap(subset(pic5[,pic5$cellID == "Prolific Stem/Prog" | pic5$cellID == "Prolific TAC" | pic5$cellID == "Early EC Prog" | pic5$cellID == "Late EC Prog" | pic5$cellID == "PC" | pic5$cellID == "Prolific Stem/Prog *" | pic5$cellID == "EC Prog *" | pic5$cellID == "PC *" ], downsample = 100), features = stem.prog_markers, assay = "RNA", label = FALSE, group.by = 'cellID') + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) #+ NoLegend()
+# Dotplot
+DotPlot(pic5, features = stem.prog_markers, assay = "RNA", scale = T, scale.by = 'size', group.by = "cellID") + 
+  scale_colour_gradient2(low = "blue", mid = "white", high = "red") + 
+  RotatedAxis()  +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.7) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 14, colour = "black")) + 
+  theme(axis.text.x = element_text(face = 'italic'))
+
+### Transporters that are somewhat expressed ###
+
+# (Glucose, fructose, mannose, galactose)
+#         "SLC2A2", "SLC2A5", 'SLC2A6' "SLC2A7", "SLC5A1", "SLC5A6", "SLC5A8", "SLC5A12"
+# Amino Acid
+#        "SLC1A1", "SLC3A1", "SLC3A2", "SLC7A7", "SLC7A9"
+# Amino Acids and Hromones
+#        "SLC6A4", "SLC6A6", 'SLC6A8', 'SLC6A19', 'SLC6A20'
+#        "SLC43A2"
+# (Nucleotides/nucleosides, Ascorbate)
+#        'SLC28A1' , 'SLC28A2'
+# Bicarbonate ions and protons
+#        'SLC9A2', 'SLC9A6'
+#        'SLC26A2', 'SLC26A3', 'SLC26A6'
+# (H+/peptide cotransporter
+#        "SLC15A1"
+# Phosphate absorption (Sulfates, di‐ and tricarboxylates, )
+#        "SLC13A1"
+# Phosphate absorption (Monocarboxylates)
+#        'SLC16A1', 'SLC16A5'
+# Phosphate absorption  (HPO4 2−, H2PO4 −)
+#        "SLC20A1"
+# Phosphate absorption Inorganic phosphate
+#        "SLC34A3"
+# Trace metals absorption
+# Fe2+, Mn2+, Cu2+, Co2+, Cd2+, Ni2+, Pb2+
+#        'SLC30A1', 'SLC30A4', 'SLC30A5', 'SLC30A10'
+#        'SLC31A1'
+#        'SLC39A1', 'SLC39A4', 'SLC39A5'
+# Other organic compounds absorption
+# Bile acids, steroid hormones
+#        'SLC10A2', 'SLC51A'
+#Fatty Acid binding and absorption
+#        'SLC27A2', 'SLC27A4'
+#        'FABP1', 'FABP2', 'FABP6'
+#        'RBP2'
+# Metabolism 1
+#        "LPL", "OTC", "SERHL2", "S100G", "SORD", "AGPS", "IDH3B", "GALM"
+# Metabolism 2
+#        "MGAM", "ANPEP", "SDSL", "AKR1E2", "DHDH", "ASS1", "FBP1", "FBP2",  "APOA1", "APOA4", "ACE2", "SI", "ALDOB"
+
+
+
+# Violin plot test
+#VlnPlot(org.tiss.combined[,org.tiss.combined$cellID == "Prolif Prog Cells" | org.tiss.combined$cellID == "Stem cells" | org.tiss.combined$cellID == "Semi-Prolif Stem/Prog Cells"], features = stem.prog_markers, split.by = "cell.origin", group.by = "cellID", pt.size = 0, combine = FALSE, log = T)
+#VlnPlot(org.tiss.combined, features = stem.prog_markers, log = TRUE)
+ 
+# correctly scale data (re-run this every time for heatmap)   
+#test <- ScaleData(org.tiss.combined, verbose = FALSE, assay="RNA")   
+```
+
+# In the chuck below we do a Pearson Correlation analysis on the top 3000 highly variable genes 
+```{r correlation of average expression, echo=FALSE,  fig.height=6, fig.width=7}
+#### NEW Seurat v5 Method ####
+
+# The features for RPCA (or correlation)
+highly_variable_feautures <- SelectIntegrationFeatures(object.list = sobj_list, nfeatures = 3000)
+
+### ONLY RUN THE THREE LINES BELOW, IF DATA IS NOT SCALED AND NORMALIZED) FOR INEGRATED DATA ONLY###
+#Idents(org.tiss.combined) <- "cellID" # Set the idents of the metadata to the one of interest (in this case our cellIDs)
+#org.tiss.combined <- NormalizeData(object = org.tiss.combined, normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+#org.tiss.combined <- ScaleData(org.tiss.combined, verbose = FALSE, assay="RNA") 
+
+### DO CORRELATION OF INTEGRATED DATA ###
+### (THIS IS THE VERSION WE WANT TO RUN!!!!! ####
+
+org.tiss.combined <- FindVariableFeatures(org.tiss.combined, selection.method = "vst", nfeatures = 3000) # Choose number of highly variable features to compare
+highly_variable_feautures <- VariableFeatures(org.tiss.combined)
+
+# all cells
+av.exp <- (AverageExpression(subset(org.tiss.combined[,org.tiss.combined$cellID == "Prolific Stem/Prog" | org.tiss.combined$cellID == "Prolific TAC" | org.tiss.combined$cellID == "TAC" | org.tiss.combined$cellID == "Early EC Prog" | org.tiss.combined$cellID == "Late EC Prog" | org.tiss.combined$cellID == "Secretory Prog" | org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "Paneth Cells" | org.tiss.combined$cellID == "Renewing EC" | org.tiss.combined$cellID == "Developing EC" | org.tiss.combined$cellID == "Undeveloped EC1" | org.tiss.combined$cellID == "Undeveloped EC2" | org.tiss.combined$cellID == "Early Immature EC" | org.tiss.combined$cellID == "Late Immature EC" | org.tiss.combined$cellID == "Migrating EC (Villous Tips)" | org.tiss.combined$cellID == "Semi-Mature EC" | org.tiss.combined$cellID == "Resting Cells" | org.tiss.combined$cellID == "Prolific Stem/Prog *" | org.tiss.combined$cellID == "EC Prog *" | org.tiss.combined$cellID == "Developing EC *" | org.tiss.combined$cellID == "Early EC *" | org.tiss.combined$cellID == "Late EC *" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "EEC *" | org.tiss.combined$cellID == "TC *" | org.tiss.combined$cellID == "Endothelium *" | org.tiss.combined$cellID == "Mesenchyme *"]), features = highly_variable_feautures, slot = "data")$RNA) #log1p is not required as the RNA slot is already log normalizd
+# Do Pearson corr test
+av.exp <- as.matrix(av.exp) # convert to matrix
+cor.exp <- cor(av.exp, method = "pearson") # put in as.data.frame is failed
+pheatmap(cor.exp, )
+
+# secretory cells
+av.exp <- (AverageExpression(subset(org.tiss.combined[,org.tiss.combined$cellID == "Secretory Prog" | org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "EEC *" | org.tiss.combined$cellID == "TC *" ]), features = highly_variable_feautures, slot = "data")$RNA) #log1p is not required as the RNA slot is already log normalizd
+# Do Pearson corr test
+av.exp <- as.matrix(av.exp) # convert to matrix
+cor.exp <- cor(av.exp, method = "pearson") # put in as.data.frame is failed
+pheatmap(cor.exp, )
+
+# Absorptive cells
+av.exp <- (AverageExpression(subset(org.tiss.combined[,org.tiss.combined$cellID == "Early EC Prog" | org.tiss.combined$cellID == "Late EC Prog" | org.tiss.combined$cellID == "Developing EC" | org.tiss.combined$cellID == "Early Immature EC" | org.tiss.combined$cellID == "Late Immature EC" | org.tiss.combined$cellID == "Migrating EC (Villous Tips)" | org.tiss.combined$cellID == "Semi-Mature EC" | org.tiss.combined$cellID == "EC Prog *" | org.tiss.combined$cellID == "Developing EC *" | org.tiss.combined$cellID == "Early EC *" | org.tiss.combined$cellID == "Late EC *"]), features = highly_variable_feautures, slot = "data")$RNA) #log1p is not required as the RNA slot is already log normalizd
+# Do Pearson corr test
+av.exp <- as.matrix(av.exp) # convert to matrix
+cor.exp <- cor(av.exp, method = "pearson") # put in as.data.frame is failed
+pheatmap(cor.exp, )
+
+# Stem cells
+av.exp <- (AverageExpression(subset(org.tiss.combined[,org.tiss.combined$cellID == "Prolific Stem/Prog" | org.tiss.combined$cellID == "Prolific TAC" | org.tiss.combined$cellID == "TAC" | org.tiss.combined$cellID == "Early EC Prog" | org.tiss.combined$cellID == "Late EC Prog" | org.tiss.combined$cellID == "Prolific Stem/Prog *" | org.tiss.combined$cellID == "EC Prog *"]), features = highly_variable_feautures, slot = "data")$RNA) #log1p is not required as the RNA slot is already log normalizd
+# Do Pearson corr test
+av.exp <- as.matrix(av.exp) # convert to matrix
+cor.exp <- cor(av.exp, method = "pearson") # put in as.data.frame is failed
+pheatmap(cor.exp)
+
+
+# secretory cells, absorbtive  and Stem (no TAC)
+av.exp <- (AverageExpression(subset(org.tiss.combined[,org.tiss.combined$cellID == "PC" | org.tiss.combined$cellID == "GC" | org.tiss.combined$cellID == "EEC" | org.tiss.combined$cellID == "PC *" | org.tiss.combined$cellID == "GC *" | org.tiss.combined$cellID == "EEC *" | org.tiss.combined$cellID == "TC *" | org.tiss.combined$cellID == "Prolific Stem/Prog" |  org.tiss.combined$cellID == "Early EC Prog" | org.tiss.combined$cellID == "Late EC Prog" | org.tiss.combined$cellID == "Prolific Stem/Prog *" | org.tiss.combined$cellID == "EC Prog *"]), features = highly_variable_feautures, slot = "data")$RNA) #log1p is not required as the RNA slot is already log normalizd
+# Do Pearson corr test
+av.exp <- as.matrix(av.exp) # convert to matrix
+cor.exp <- cor(av.exp, method = "pearson") # put in as.data.frame is failed
+pheatmap(cor.exp) 
+
+# Personal ordered heatmap
+level <- c("PC", "GC", "EEC", "Prolific Stem/Prog", "Early EC Prog", "Late EC Prog", "PC *", "GC *", "EEC *", "TC *", "Prolific Stem/Prog *", "EC Prog *")
+Heatmap(cor.exp, row_order = level)
+
+
+
+
+### DO CORRELATION OF INDIVIDUAL OBJ (ORG vs TISS) ###
+### This is a test code ###
+# Let take the all the genes for the correlation analysis of Tiss vs Org
+# One could include all genes or only genes of interest (i.e. only highly variable genes)
+# In this case, we want to take only the genes that are expressed (no 0 counts), and genes that intersect between Tiss and Org
+g.2 <- head(rownames(HVFInfo(object = sobj_list[[2]])), length(rownames(sobj_list[[2]]))) # get genes from tissue
+highly_variable_feautures <- head(rownames(HVFInfo(object = sobj_list[[2]])), length(rownames(sobj_list[[2]])))
+highly_variable_feautures <- intersect(g.2, rownames(GetAssayData(object = sobj_list[[1]], slot = "scale.data"))) # Find genes that only intersect with Ileum ORG (the scale.data slot can be replaced with anything else (e.g. counts or data))
+
+# Make aggregated expression for organoid
+Idents(sobj_list[["ileum_pig_org.h5seurat"]]) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+sobj_list[["ileum_pig_org.h5seurat"]] <- NormalizeData(object = sobj_list[["ileum_pig_org.h5seurat"]], normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+#sobj_list[["ileum_pig_org.h5seurat"]] <- ScaleData(sobj_list[["ileum_pig_org.h5seurat"]], verbose = FALSE, assay="RNA") 
+ORG.avg.exp <- (AverageExpression(subset(sobj_list[["ileum_pig_org.h5seurat"]][,sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Prolific Stem/Prog" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Prolific TAC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "TAC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Early EC Prog" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Late EC Prog" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID ==  "Secretory Prog" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "PC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "GC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "EEC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Developing EC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Undeveloped EC1" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Undeveloped EC2" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Early Immature EC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Late Immature EC" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Migrating EC (Villous Tips)" | sobj_list[["ileum_pig_org.h5seurat"]]$cellID == "Semi-Mature EC"]), features = highly_variable_feautures,  slot = "data")$RNA)
+
+# Make aggregated expression for tissue
+Idents(sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]] <- NormalizeData(object = sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]], normalization.method = "LogNormalize", scale.factor = 10000, assay = "RNA")
+#sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]] <- ScaleData(sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]], verbose = FALSE, assay="RNA") 
+Tiss.avg.exp <- (AverageExpression(subset(sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]][,sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID == "Prolific Stem/Prog *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID == "EC Prog *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID == "Developing EC *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID == "Early EC *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID == "Late EC *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID ==  "PC *"  | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID ==  "GC *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID ==  "EEC *" | sobj_list[["ileum_pig_tiss(WIERDA).h5seurat"]]$cellID ==  "TC *"]), features = highly_variable_feautures, slot = "data")$RNA)
+# Do Pearson corr test
+avg.exp.comb <- cbind(Tiss.avg.exp, ORG.avg.exp)
+avg.exp.comb <- as.matrix(avg.exp.comb)
+cor.exp <- cor(avg.exp.comb, method = "pearson")
+# Make heatmap
+pheatmap(cor.exp,)
+
+
+```
+
+# In the chuck below we do Random Forest using the tissue data as training, and predict the cell types in organoid.
+# high predictive performance suggests maturity of organoid
+```{r correlation of average expression, echo=FALSE,  fig.height=6, fig.width=8}
+gc(reset = TRUE) # clean memory
+
+# Make list of the Seurat objects we want to use for the random forest clasifier.
+sobj_list <- list() # make empty list to append Seurat Objects for correlation 
+sobj_list["ileum_pig_org.h5seurat"] <- sobj.org
+sobj.tiss.epit <- NormalizeData(sobj.tiss.epit_noTC, normalization.method = "LogNormalize", scale.factor = 10000) # re normalize as this has been subsetted with endothelium, mesenchyme and TCs removed
+sobj_list["ileum_pig_tiss(WIERDA).h5seurat"] <- sobj.tiss.epit
+
+
+# Make training data (ileum Tissue)
+# Collect all genes of Ileum Tissue
+# Note that "highly_variable_feautures" includes all genes, and NOT the highly variable ones (so ignore the name for now)
+g.2 <- head(rownames(HVFInfo(object = sobj_list[[2]])), length(rownames(sobj_list[[2]]))) # find all genes in tissue
+highly_variable_feautures <- head(rownames(HVFInfo(object = sobj_list[[2]])), length(rownames(sobj_list[[2]])))
+highly_variable_feautures <- intersect(g.2, rownames(GetAssayData(object = sobj_list[[1]], slot = "scale.data"))) # Find genes that only intersect with Ileum ORG
+highly_variable_feautures <- gsub("-", "_", highly_variable_feautures, ) # remove signs that are not allowed
+highly_variable_feautures <- gsub("(", "_", highly_variable_feautures, fixed = TRUE) # used fixed to remove exact matching of "(" or ")"
+highly_variable_feautures <- gsub(")", "_", highly_variable_feautures, fixed = TRUE) 
+# We use scaled data, because it was z-score transformed, so the highly expressed genes will not dominate the model
+ML.data.train <- sobj_list[[2]]@assays$RNA$data # data slot contains the log normalized counts
+# let's transpose the matrix and make it to a dataframe
+ML.data.train <- t(ML.data.train) %>% as.data.frame()
+# get submatrix with two genes
+genes <- intersect(rownames(sobj_list[[2]]), rownames(sobj_list[[1]])) # Genes we want that intersect with ORG
+ML.data.train <- ML.data.train[, genes] # submatrix with genes we want
+# find cells with non zero expression and remove them from matrix
+keep.cells <- rownames(ML.data.train[, rowSums(ML.data.train) != 0])
+ML.data.train <- ML.data.train[keep.cells, ] # filter matrix
+# add the CellID and Cell.origin to the dataframe
+ML.data.train$cell_type <- sobj_list[[2]]$cellID
+# Make a new column called cell_type
+highly_variable_feautures <- append(highly_variable_feautures, "cell_type") 
+ML.data.train$cell_type <- factor(ML.data.train$cell_type) # Make factor 
+# Make training data (ileum Tissue) with the corrected gene names
+colnames(ML.data.train) <- highly_variable_feautures
+
+# Make testing data (ileum Org)
+# Collect genes of Organoid
+g.1 <- head(rownames(HVFInfo(object = sobj_list[[1]])), length(rownames(sobj_list[[1]])))
+highly_variable_feautures <- head(rownames(HVFInfo(object = sobj_list[[1]])), length(rownames(sobj_list[[1]])))
+highly_variable_feautures <- intersect(g.1, rownames(GetAssayData(object = sobj_list[[2]], slot = "scale.data"))) # Find genes that only intersect with Ileum Tiss
+highly_variable_feautures <- gsub("-", "_", highly_variable_feautures, )
+highly_variable_feautures <- gsub("(", "_", highly_variable_feautures, fixed = TRUE) 
+highly_variable_feautures <- gsub(")", "_", highly_variable_feautures, fixed = TRUE) 
+# Prepare the test data
+ML.data.test <- sobj_list[[1]]@assays$RNA$data 
+ML.data.test <- t(ML.data.test) %>% as.data.frame()
+genes <- intersect(rownames(sobj_list[[1]]), rownames(sobj_list[[2]])) 
+ML.data.test <- ML.data.test[, genes]
+keep.cells <- rownames(ML.data.test[, rowSums(ML.data.test) != 0])
+ML.data.test <- ML.data.test[keep.cells, ] 
+ML.data.test$cell_type <- sobj_list[[1]]$cellID
+highly_variable_feautures <- append(highly_variable_feautures, "cell_type") 
+ML.data.test$cell_type <- factor(ML.data.test$cell_type)
+# Make test data (ileum Org) with the corrected gene names
+colnames(ML.data.test) <- highly_variable_feautures
+
+# In order to save RAM, we save the training and test data, and reboot R
+if (dir.exists(file.path(parent_directory1, "/Random Forest Ileum Org Pred/Test:Training data (RDS)"))) {
+  saveRDS(ML.data.train, file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.train")
+  saveRDS(ML.data.test, file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.test")
+} else {
+  dir.create(file.path(parent_directory1, "/Random Forest Ileum Org Pred/Test:Training data (RDS)"), recursive = TRUE)
+  saveRDS(ML.data.train, file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.train")
+  saveRDS(ML.data.test, file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.test")
+}
+
+# Open the data and factor the classifications terms
+ML.data.train <- readRDS(file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.train")
+ML.data.train$cell_type <- factor(ML.data.train$cell_type) # as factor required for classification.
+ML.data.test <- readRDS(file="/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum ORG vs TISSUE (integration)/Random Forest Ileum Org Pred/Test:Training data (RDS)/ML.data.test")
+ML.data.test$cell_type <- factor(ML.data.test$cell_type)
+
+gc(reset = TRUE) # clean memory again (JESUS!, THIS EAT LOTS OF MEMMORY)
+
+#### Lets do Random Forest ####
+### The optimal parameters have already been found here and this is the final model ### 
+# Now we will prepare the model for training and see the optimal number of trees required
+set.seed(123) # For reproducibility 
+# We use Random forest on the full data set. random forest already re-samples using bootstrapping. 
+# So OOB error rate is a good estimate for the performance
+mtry = sqrt(ncol(ML.data.train[, -dim(ML.data.train)[2]])) # for random forest we use m = √p (m=p for bagging) 
+RF_test = randomForest(cell_type ~., data = ML.data.train, mtry = 122, ntree=625, importance = TRUE) # localImp = TRUE
+RF_test
+
+# Analyze the predictive performance by running RF using optimized settings
+RF_test = randomForest(cell_type ~., data = ML.data.train, mtry = 122, importance = TRUE, ntree=625) # 122 mtry stock
+pred_org = predict(RF_test, ML.data.test, type = "class")
+cm = table(ML.data.test[, dim(ML.data.test)[2]], pred_org)
+cm
+
+# Find important features per class
+head(importance(RF_test))
+
+#### MODEL OPTIMIZATION ####
+#### DO NOT RUN THIS OF ALREADY DONE, AND USE THE RF MODEL ABOVE ####
+
+### Find optimal number of trees in the rang between 0-1000 (you can do more if you have all the time of the world!)
+mtry = sqrt(ncol(ML.data.train[, -dim(ML.data.train)[2]])) # for random forest we use m = √p (m=p for bagging, but we dont bag here) 
+RF_test = randomForest(cell_type ~., data = ML.data.train, mtry = mtry, ntree=2000, importance = TRUE) # localImp = TRUE
+RF_test
+# Plot the Random Forest Error vs Tree
+# Here we found that 625 Trees work works best
+plot(RF_test, main="RF Training - ", sub="Number of Trees")
+par(mar=c(5,0,4,2)) #No margin on the left side
+plot(c(0,1),type="n", axes=F, xlab="Trees", ylab="Error")
+legend("top", colnames(RF_test$err.rate),col=1:length(RF_test), cex=0.8, fill=1:length(RF_test), lty=1:length(RF_test))
+
+###  Now we will test the best number variables that will be randomly selected
+set.seed(123)
+# Making the formula for the model
+# Running Random Forest on training data with m = √p with m = √12868 = 113, so between 100:120 is reasonable to test, theoretical optimum is 4
+OOB.err_RF_cell_types_test = double(ncol(ML.data.train))
+for (q in 70:130)
+{
+RF_cell_types = randomForest(cell_type ~., data = ML.data.train, mtry = q, importance = TRUE, ntree=625) # 626 trees was found to be sufficient
+OOB.err_RF_cell_types_test[q] = tail(RF_cell_types$err.rate, n=1)[1]
+cat(q," ")
+}
+# Plot the error rate (OOB)
+OOB.err_RF_cell_types_test[70:130] # 122 gives lowest OOB ERR
+matplot(70:130, OOB.err_RF_cell_types_test[70:130], pch = 20, col=c("red"), type="b", 
+        ylab = "Out-of-bag Error Rate", xlab = "Number of Predictors at each Split",
+        main = "RF Training OOB - Ileum Tissu")
+par(mar=c(5,0,4,2)) #No margin on the left side
+plot(c(0,1),type="n", axes=F, xlab="Trees", ylab="Error")
+legend("topright", legend=c("Number of Predictors at each Split"), pch = 20, col=c("red"))
+
+# Analyze the predictive performance by running RF using optimized settings
+RF_test = randomForest(cell_type ~., data = ML.data.train, mtry = 122, importance = TRUE, ntree=625) # 122 mtry stock
+pred_org = predict(RF_test, ML.data.test, type = "class")
+cm = table(ML.data.test[, dim(ML.data.test)[2]], pred_org)
+cm
+
+# Must be installed from github to show RF tree
+devtools::install_github("araastat/reprtree")
+library("reprtree")
+reprtree:::plot.getTree(RF_test, k = 63, depth = 4)
+
+# Lets see which genes are important for the prediction of "Late Enterocytes"
+RF_test.vs.late_EC = randomForest(cell_type ~., data = ML.data.train, mtry = 127, importance = TRUE, ntree=625)
+pred_org = predict(RF_test.vs.late_EC, ML.data.test, type = "class")
+cm = table(ML.data.test[, dim(ML.data.test)[2]], pred_org)
+cm <- as.matrix(cm)
+cm
+
+```
+
+
+# In the chuck below, we check the expression of given gene in cluster of interest (feature plots)
+```{r gene plits, fig.height=10, fig.width=10, echo=FALSE} 
+FeaturePlot(org.tiss.combined, features = c("CENPF", "HMGB2", "TPX2", "UBE2C", "TOP2A", "BNIP3"),cols = c("grey", "red"),  pt.size = 0.5, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+FeaturePlot(org.tiss.combined, features = c("TFF3", "SPINK4", "REG4", "MUC2"),cols = c("grey", "red"), pt.size = 1, label = FALSE) 
+
+
+####### Enteroendocrine ########  
+FeaturePlot(org.tiss.combined, features = c("NEUROD1", "CHGA", "CHGB", "PENK", "PYY", "CPE", "GCG"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+####### Tuft cells ########  
+FeaturePlot(org.tiss.combined, features = c("CCL5", "CD52", "EPHB6", "DCLK1"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")  
+
+
+# Pan Makers #
+####### Endothelium/stromal ########
+FeaturePlot(org.tiss.combined, features = c("VWF", "PECAM1"), cols = c("grey", "red"),  pt.size = 1, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+VlnPlot(org.tiss.combined, features = c("VWF", "PECAM1"), slot = 'counts', log = TRUE)
+# Mesenchyme cells #
+FeaturePlot(org.tiss.combined, features = c("COL3A1", "COL1A1", "ACTA2"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+VlnPlot(org.tiss.combined, features = c("COL3A1", "COL1A1", "ACTA2"), slot = 'counts', log = TRUE)
+####### Epithelium ########
+FeaturePlot(org.tiss.combined, features = c("EPCAM", "FABP6"),cols = c("grey", "red"), pt.size = 1, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+VlnPlot(org.tiss.combined, features = c("EPCAM", "FABP6", "EPCAM", "FABP6"), slot = 'counts', log = TRUE)
+
+
+# These cells also have enterocyte expression signature
+FeaturePlot(org.tiss.combined, features = c("CENPF", "HMGB2", "TPX2", "UBE2C", "TOP2A", "ENSSSCG00000026302"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# Actual Stem cells (Human, also Pig)
+FeaturePlot(org.tiss.combined, features = c("OLFM4", "CDCA7"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+######## Panneth: Same as stem/prog cells, but with LYZ ########  
+FeaturePlot(org.tiss.combined, features = c("LYZ", "PIGR", "SPINK1", "C3"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# Genes related to stem to secretory
+FeaturePlot(subset(org.tiss.combined[,org.tiss.combined$cellID == "Goblet Cells" | org.tiss.combined$cellID == "Panneth Cells" | org.tiss.combined$cellID == "Secretory Cells (Goblet/Enteroendocrine)" | org.tiss.combined$cellID == "Enteroendocrine Cells"]), features = c("SPDEF" ,"ATOH1" ,"HES1", "TOP2A", "SPINK4", "REG4"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap", label = FALSE) + ylab("UMAP 1") + xlab("UMAP 2") 
+
+####### Enterocyte ########  
+# These are genes related to metabolism and absorptive molecules
+FeaturePlot(org.tiss.combined, features = c("FABP1", "FABP2", "SLC5A1", "APOA1", "APOA4", "ACE2", "SI", "FABP6"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# Enterocyte development genes (microphillus)
+FeaturePlot(org.tiss.combined, features = c("ACTB", "PLS1", "VIL1" ,"EPS8", "EZR", "MYO6", "MYO1A", "KRT18", "KRT8", "KRT19"),cols = c("grey", "red"),  pt.size = 0.5, reduction = "umap", label = TRUE) + ylab("UMAP 1") + xlab("UMAP 2") 
+# Other general Enterocyte markers, these do not seem to be expressed in ealy-enteroytes
+FeaturePlot(org.tiss.combined, features = c("APOA4", "DPEP1", "ANPEP", "APOB", "ASS1", "FABP2", "APOC3", "RBP2"),cols = c("grey", "red"),  pt.size = 0.5, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+```
+
+```{r}
+sessionInfo()
+```
+
