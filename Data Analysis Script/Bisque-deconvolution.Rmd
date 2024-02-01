@@ -1,0 +1,831 @@
+---
+title: "Bisque deconvolution benchmarking en cell type estimation"
+output: html_notebook
+---
+
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE}
+library(dplyr)
+library(dbplyr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratData)
+library(patchwork) # Also being used for Cellchat (but main purpose was something else)
+library(hdf5r)
+library(tidyverse)
+library(gsubfn)
+library(ggplot2)
+library(RColorBrewer)
+library(writexl)
+
+# For annotation, gene name conversions
+library(rPanglaoDB)
+library(AnnotationHub)
+library(ensembldb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Ss.eg.db)
+library(DropletUtils)
+library(biomaRt)
+
+# to download external library
+library(devtools)
+
+# for Monocle3
+library(SeuratWrappers)
+library(monocle3)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork) # also used for cellchat 
+
+# co-expression network analysis packages:
+# NOTE: DOWNLAOD THE "FORTRAN compiler" on Mac systems using ARM64. This compiler is not integrated in Xcode.
+library(qlcMatrix)  
+library(impute) 
+library(preprocessCore) 
+library(WGCNA)
+library(hdWGCNA)
+
+# deconvolution
+library(Biobase) # install this package if needed (for simulated data)
+library(BisqueRNA)
+
+# Cellchat and dependencies:
+library(NMF)
+library(circlize)
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+```
+
+
+#### DECON BisqueRNA (move this to a different block or R script. This must become its own PIPELINE) ####
+
+
+```{r BisqueRNA deconvolution, fig.height=3, fig.width=4}
+# De-convolution using BisqueRNA
+
+###### PREPERATION OF SIMULATED DATA ########
+
+# import organoid annotations
+sobj.org <- LoadH5Seurat("/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum tissue/Wiarda - Ileum Tissue (non-immune)/WGCNA/ileum_pig_org.v4.WGCNA.h5seurat")
+# import tissue annotations
+sobj.tiss <- LoadH5Seurat("/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum tissue/Wiarda - Ileum Tissue (non-immune)/WGCNA/ileum_pig_tiss(WIERDA).epithel.v4.WGCNA.h5seurat")
+
+
+
+
+######### SKIP IF WE DONT MAKE PSEUDOBULK AS REFERENCE ###############
+
+### Make Pseudobulk of the seurat objects and their technical replicates:
+### (skip making pseudobulk and move to making ExpressionSet of the single cell if you don't want to make simulated bulk sample) 
+# check the dimension of our raw count matrix
+dim(sobj@assays$RNA@layers$counts)
+# Check a snippet of the raw count matrix
+sobj@assays$RNA@layers$counts[1:6, 1:6] # of the first 6 rows and columns
+# Check the seurat object metadata for control
+sobj@meta.data
+# extract the aggregated pseudo bulk of each technical replicate in our suerat obj
+# 'arg' should be one of "data", "scale.data", "counts"
+bulk <- AggregateExpression(object = sobj, group.by = "orig.ident", slot = "counts")
+bulk$RNA # AggregateExpression adds and $RNA slot to it
+# Convert it into a matrix
+bulk <- as.matrix(bulk$RNA)
+bulk
+# change the col names to numbers... (i like it this way)
+colnames(bulk)[1] <- "1"
+colnames(bulk)[2] <- "2"
+bulk # Check it
+### Make a ExpressionSet of the single cell Seurat obj that contains the two technical replicates
+sobj <- sobj1
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sc.eset1.2 <- SeuratToExpressionSet(seurat.object = sobj, position = 2, delimiter = "_", version = "v3")
+sc.eset1.2$cellType # Now check the celltypes in the expression set
+sc.eset1.2$SubjectName # Check the samples in the expression set
+
+######### SKIP IF WE ALREADY MADE THE THIRD REFERENCE ###############
+
+### To make the third reference, we make can also make a manipulated version of ileum_Org_2, SKIP IF THE MERGED data WAS USED
+# We first split the original merged sobj in two
+list.of2 <- SplitObject(sobj, split.by = "orig.ident")
+# We now take ileum_Org_2 and manipulated it slightly by removing some cells from each cell type
+sobj.2 <- list.of2[[2]] # extract the second sobj from the list of two, which is ileum_Org_2
+# Subset and remove some  random cells
+cell.to.remove <- c('ATCCACCGTCAGCGTC-1_2', 'ATCCCTGAGGACGCAT-1_2', 'ATCCCTGCATTCTTCA-1_2', 'ATCCCTGTCTAATTCC-1_2', 'ATCCTATGTATCACGT-1_2', 'ATCGATGCATATCGGT-1_2', 'ATCGCCTCACCCAAGC-1_2', 'ATCGCCTTCCAGCTCT-1_2', 'ATCGGATTCCCTTGGT-1_2', 'ATCGTGATCAATCCGA-1_2','ATTCTACAGGGTTAAT-1_2', 'CAACCAAGTACCGGAA-1_2', 'GGCTGTGGTTATCTTC-1_2', 'GGCTTTCCAGAGCGTA-1_2'	,'GGGAAGTAGACCAAAT-1_2', 'GGCACGTCAACCGATT-1_2', 'GGCAGTCAGCCGTTAT-1_2', 'GGATCTACAACAAGAT-1_2', 'GGATGTTCACGATAGG-1_2', 'GGAGATGAGAAACCCG-1_2', 'GCTTGGGAGCGCCGTT-1_2', 'GGAAGTGCACTACAGT-1_2', 'GGAAGTGCAGACCTGC-1_2', 'GCGTGCAAGATGGCGT-1_2', 'GCTACCTCATGTGCCG-1_2', 'GCGAGAAGTCGGCTAC-1_2', 'GCGGAAAGTTCGTTCC-1_2')
+sobj.2 <- subset(sobj.2, cells = cell.to.remove, invert = TRUE) # Invert = TURE so that we subset without the cells instead of with
+### extract the aggregated pseudo bulk of the sobj
+bulk.3 <- AggregateExpression(object = sobj.2, group.by = "cell.origin", slot = "counts")
+bulk.3$RNA # AggregateExpression adds and $RNA slot to it
+# Convert it into a matrix
+bulk.3 <- as.matrix(bulk.3$RNA)
+# change the col names to my liking...
+colnames(bulk.3)[1] <- "3"
+bulk.3 # Check it
+### Rename the cells so that they become different from the original sobj, 
+head(colnames(sobj.2))
+sobj.2 <- RenameCells(object = sobj.2, new.names = paste(colnames(x = sobj.2[["RNA"]]), "_3", sep = "")) # paste an extra "_3" to the cell names so that we could label it as sample 3 reference when we make an SeuratToExpressionSet
+### Name make as ExpressionSet of the single cell Seurat obj
+sc.eset.3 <- SeuratToExpressionSet(seurat.object = sobj.2, position = 3, delimiter = "_", version = "v3")
+
+######### SKIP IF WE ALREADE MADE SIMULATED DATA ###############
+
+### Not make a simulated Bulk data from our single cell where its lacking the EEC:
+# Endocrine (with unique markers)
+endoc <- WhichCells(sobj[,sobj$cellID == "EEC"], expression = CHGA | NEUROD1 | NEUROG3 | PAX4 > 0)
+# Make new subset lacking EEC
+EEC.sobj <- subset(sobj, cells = endoc, invert = TRUE) # Invert = TURE so that we subset without the EEC instead of with EEC
+# Make bulk and convert to matrix
+bulk.EEC <- AggregateExpression(object = EEC.sobj, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.EEC <- as.matrix(bulk.EEC$RNA)
+# change the col names to my liking...
+colnames(bulk.EEC)[1] <- "EEC"
+bulk.EEC
+############## MAKE AN ORGANOID THAT LACKS A CELL TYPE ################
+### Make new subset lacking celltype of interest
+EEC.sobj <- subset(sobj1, idents = c('Undeveloped EC', 'TAC', "Prolific Stem/Prog"), invert = TRUE) # Invert = TURE so that we subset without the celltype instead of with celltype
+# Make bulk and convert to matrix
+bulk.EEC <- AggregateExpression(object = EEC.sobj, group.by = "orig.ident",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.EEC <- as.matrix(bulk.EEC$RNA)
+# change the col names to my liking...
+colnames(bulk.EEC)[1] <- "EEC"
+colnames(bulk.EEC)[2] <- "EEC2"
+bulk.EEC
+############## OR MAKE SOMETHING ELSE including a new rare celltype ################
+### Make new subset that contained a unknown (tuft or mesenchyme) celltype of interest
+EEC.sobj <- sobj
+# Make bulk and convert to matrix
+bulk.EEC <- AggregateExpression(object = EEC.sobj, group.by = "orig.ident",  slot = "counts")
+bulk.EEC <- as.matrix(bulk.EEC$RNA)
+# change the col names to my liking...
+colnames(bulk.EEC)[1] <- "EEC"
+colnames(bulk.EEC)[2] <- "EEC2"
+bulk.EEC
+# Make bulk of new celltype and convert to matrix
+bulk.sobj.tuft.mes <- AggregateExpression(object = sobj.tuft.mes, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.sobj.tuft.mes <- as.matrix(bulk.sobj.tuft.mes$RNA)
+# change the col names to my liking...
+colnames(bulk.sobj.tuft.mes)[1] <- "EEC3"
+bulk.sobj.tuft.mes
+# now sum up the new cell type to bulk.EEC
+# make data.frame
+bulk.EEC <- data.frame(bulk.EEC)
+# sum up
+bulk.sobj.tuft.mes <- data.frame(bulk.sobj.tuft.mes)
+bulk.EEC$EEC <- bulk.EEC$EEC + bulk.sobj.tuft.mes$EEC3
+bulk.EEC$EEC2 <- bulk.EEC$EEC2 + bulk.sobj.tuft.mes$EEC3
+# make matrix again
+bulk.EEC <- as.matrix(bulk.EEC)
+bulk.EEC
+
+
+
+
+
+######### USE THIS CODE TO IMPORT THE TRUE BULK IF WE HAVE INTEREST IN DECONVOLUTING ###############
+
+### Import and parse the BULK data:
+# Collect the bulk data full name (with directory) and put in a list
+files <- list.files("/Users/hamid/Desktop/ABG MSc project/BULK data/CountMatrix", "*.txt", full.names = TRUE) 
+# Make the BULK matrix and put in a list
+BULK.counts <- lapply(files, read.delim, header=T) # header = TRUE uses first row as column names
+# UPDATE GENE NAMES
+# Connect to the sScrofa database using mart
+ensembl <- useMart("ensembl", dataset="sscrofa_gene_ensembl") # the website can get stuck sometimes!
+bulk <- data.frame() # make empty data frame in order to append the BULK samples in it
+# we loop in range of BULK data, because that determines the number of BULK data in the list and convert the ENSEMBL gene names
+for (i in 1:length(x = BULK.counts)) {  
+  # For all of our ensembl_gene_id, find all gene symbols
+  bm <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol"), values=BULK.counts[[i]]$Geneid, mart=ensembl)
+  # Find all the ENSEMBL ids in our BULK data
+  ENS <- BULK.counts[[i]]$Geneid
+  # Find the positions of our BULK ENSEMBL ids in the bm output that have a gene name (gene ID)
+  ENSEMBL_IDs.pos <- na.omit(c(match(c(paste(ENS)), bm[,1]))) # and remove NAs (ENS with no gene IDs)
+  # Now find the GeneIDs in bm using the ENSEMBL_IDs.pos
+  geneIDs <- bm[,2][ENSEMBL_IDs.pos] 
+  # Since not all ENSEMBL_IDs have true gene name, we need to find the index of geneIDs with no gene name and remove their corresponding ENSEMBL_IDs
+  # To do this, we will remove genes with no names, and then find the index of these genesID in bm in order to find the corresponding ENSEMBL ids
+  geneIDs <- as.character(geneIDs[geneIDs !=""])
+  # find position of gene IDs in them
+  geneIDs.pos <- c(match(c(paste(geneIDs)), bm[,2])) 
+  ENSEMBL_IDs <- bm[,1][geneIDs.pos] # find the ENSEMBL_IDs using the positions of the gene IDs
+  # Now we have found all the ENSEMBL ids that have a annotated gene name (winch are also found in our BULK)
+  # We will their final positions in our BULK and finally replace them with the true gene ID
+  # NOTE: The order of the genes are conserved using the method above
+  final.pos <- c(match(c(paste(ENSEMBL_IDs)), BULK.counts[[i]]$Geneid))
+  # Replace the name of that genes for all slots
+  BULK.counts[[i]]$Geneid[c(final.pos)] <- c(paste(geneIDs))
+  
+  ### Make total BULK count matrix with rows as genes and columns as samples
+  # Append in the empty data frame the gene names in rows and gene counts as columns per sample (order is preserved)
+  bulk[BULK.counts[[i]][,1], paste(i)] <- BULK.counts[[i]][,2]
+}
+# Now only keep genes (rows) where there is at least one gene expressed across the bulk samples
+bulk <- bulk[rowSums(bulk) > 0, ] # sum of the rows must be > 0 for variance of that gene across the samples > 0
+# Turn into matrix
+bulk <- as.matrix(bulk)
+bulk # check the 3 bulk data
+
+
+
+
+
+
+######### MAKE EXPRESSION SET FOR the 3 SINGLE CELL REFERENCES and MAKE 3 PSEUDOBULKS ###############
+
+
+### Make a ExpressionSet of the single cell Seurat obj that contains the two technical replicates
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sc.eset1.2 <- BisqueRNA::SeuratToExpressionSet(seurat.object = sobj, position = 2, delimiter = "_", version = "v3")
+sc.eset1.2$cellType # Now check the celltypes in the expression set
+sc.eset1.2$SubjectName # Check the samples in the expression set
+# Make the pseudobulks for these two sampples
+bulk1.2 <- AggregateExpression(object = sobj, group.by = "orig.ident",  slot = "counts") # We group by cell.origin to take the whole data
+bulk1.2 <- as.matrix(bulk1.2$RNA)
+# change the col names to my liking...
+colnames(bulk1.2)[1] <- "1"
+colnames(bulk1.2)[2] <- "2"
+bulk1.2
+
+### To make the third reference, by using the merged data
+# remove the duplicated cell names between the technical replicates that were found by chance
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+duplicated.barcode <- c('AGGAATAGTGGGCTCT-1_2', 'GTCATCCCAATGAAAC-1_1') # these are the duplicates we found
+sobj <- sobj[,!colnames(sobj) %in% duplicated.barcode] # remove duplicated barcodes from the seurat object
+# now make new cell names that represent singular data
+cell_names <- colnames(sobj) # Get the cell names
+cell_names <- gsub("_2", "_3", cell_names) # change all the cells with _2 in their name to _3 to make them look like one sample
+cell_names <- gsub("_1", "_3", cell_names) # change all the cells with _1 in their name to _3 to make them look like one sample
+# replace old names with new ones
+sobj <- RenameCells(sobj, new.names = cell_names)
+# make the new expression set of the third reference
+sc.eset3 <- SeuratToExpressionSet(seurat.object = sobj, position = 2, delimiter = "_", version = "v3")
+sc.eset3$SubjectName # Now check the celltypes in the expression set
+sc.eset3$cellType  # Check the samples in the expression set
+# Make the pseudobulks for these third sampple
+bulk3 <- AggregateExpression(object = sobj, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk3 <- as.matrix(bulk3$RNA)
+# change the col names to my liking...
+colnames(bulk3)[1] <- "3"
+bulk3
+
+### Or make the third reference based on manipulated version of ileum_Org_2, SKIP IF THE MERGED data WAS USED
+# We first split the original merged sobj in two
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+list.of2 <- SplitObject(sobj, split.by = "orig.ident")
+# We now take ileum_Org_2 and manipulated it slightly by removing some cells from each cell type
+sobj.2 <- list.of2[[2]] # extract the second sobj from the list of two, which is ileum_Org_2
+# Subset and remove some  random cells (one cell each cell type)
+cell.to.remove <- c('ATCCACCGTCAGCGTC-1_2', 'ATCCCTGAGGACGCAT-1_2', 'ATCCCTGCATTCTTCA-1_2', 'ATCCCTGTCTAATTCC-1_2', 'ATCCTATGTATCACGT-1_2', 'ATCGATGCATATCGGT-1_2', 'ATCGCCTCACCCAAGC-1_2', 'ATCGCCTTCCAGCTCT-1_2', 'ATCGGATTCCCTTGGT-1_2', 'ATCGTGATCAATCCGA-1_2','ATTCTACAGGGTTAAT-1_2', 'CAACCAAGTACCGGAA-1_2', 'GGCTGTGGTTATCTTC-1_2', 'GGCTTTCCAGAGCGTA-1_2'	,'GGGAAGTAGACCAAAT-1_2', 'GGCACGTCAACCGATT-1_2', 'GGCAGTCAGCCGTTAT-1_2', 'GGATCTACAACAAGAT-1_2', 'GGATGTTCACGATAGG-1_2', 'GGAGATGAGAAACCCG-1_2', 'GCTTGGGAGCGCCGTT-1_2', 'GGAAGTGCACTACAGT-1_2', 'GGAAGTGCAGACCTGC-1_2', 'GCGTGCAAGATGGCGT-1_2', 'GCTACCTCATGTGCCG-1_2', 'GCGAGAAGTCGGCTAC-1_2', 'GCGGAAAGTTCGTTCC-1_2')
+sobj.2 <- subset(sobj.2, cells = cell.to.remove, invert = TRUE) # Invert = TURE so that we subset without the cells instead of with
+### extract the aggregated pseudo bulk of the sobj
+bulk.3 <- AggregateExpression(object = sobj.2, group.by = "cell.origin", slot = "counts")
+bulk.3$RNA # AggregateExpression adds and $RNA slot to it
+# Convert it into a matrix
+bulk.3 <- as.matrix(bulk.3$RNA)
+# change the col names to my liking...
+colnames(bulk.3)[1] <- "3"
+bulk.3 # Check it
+### Rename the cells so that they become different from the original sobj, 
+head(colnames(sobj.2))
+sobj.2 <- RenameCells(object = sobj.2, new.names = paste(colnames(x = sobj.2[["RNA"]]), "_3", sep = "")) # paste an extra "_3" to the cell names so that we could label it as sample 3 reference when we make an SeuratToExpressionSet
+### Name make as ExpressionSet of the single cell Seurat obj
+sc.eset3 <- SeuratToExpressionSet(seurat.object = sobj.2, position = 3, delimiter = "_", version = "v3")
+sc.eset3$SubjectName # Now check the celltypes in the expression set
+sc.eset3$cellType  # Check the samples in the expression set
+
+
+######### MAKE SIMULATED BULK DATA FOR DECONVOLUTION  ###############
+
+### Make new subset lacking Semi-Mature ECs
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sobj.lacking <- subset(sobj, idents = c('Semi-Mature EC'), invert = TRUE) # Invert = TURE so that we subset without the celltype instead of with celltype
+# Make bulk and convert to matrix
+bulk.lacking.EC <- AggregateExpression(object = sobj.lacking, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.lacking.EC <- as.matrix(bulk.lacking.EC$RNA)
+bulk.lacking.EC
+# change the col names to my liking...
+colnames(bulk.lacking.EC) <- c("No.ECs")
+# Now find the true proportions of lacking cells
+bulk.lacking.EC.props <- prop.table(table(Idents(sobj.lacking)))
+bulk.lacking.EC.props <- as.data.frame(bulk.lacking.EC.props) # make data frame
+rownames(bulk.lacking.EC.props) <- bulk.lacking.EC.props$Var1
+bulk.lacking.EC.props$Var1 <- NULL
+# add zero to missing cells types that we removed
+bulk.lacking.EC.props <- rbind(bulk.lacking.EC.props, 'Semi-Mature EC' = c(0))
+rm(sobj.lacking) # remove object we don't need
+# Now find the true proportions of all cells
+tue.prop.EC <- prop.table(table(Idents(sobj)))
+tue.prop.EC <- as.data.frame(tue.prop.EC) # make data frame
+rownames(tue.prop.EC) <- tue.prop.EC$Var1
+tue.prop.EC$Var1 <- NULL
+
+### Make new subset lacking prolific Stem/progs
+sobj <- ssobj.orgobj1
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sobj.lacking <- subset(sobj, idents = c('Early EC Prog'), invert = TRUE) # Invert = TURE so that we subset without the celltype instead of with celltype
+# Make bulk and convert to matrix
+bulk.lacking.SP <- AggregateExpression(object = sobj.lacking, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.lacking.SP <- as.matrix(bulk.lacking.SP$RNA)
+bulk.lacking.SP
+# change the col names to my liking...
+colnames(bulk.lacking.SP) <- c("No.SPs")
+# Now find the true proportions of lacking cells
+bulk.lacking.SP.props <- prop.table(table(Idents(sobj.lacking)))
+bulk.lacking.SP.props <- as.data.frame(bulk.lacking.SP.props) # make data frame
+rownames(bulk.lacking.SP.props) <- bulk.lacking.SP.props$Var1
+bulk.lacking.SP.props$Var1 <- NULL
+# add zero to missing cells types that we removed
+bulk.lacking.SP.props <- rbind(bulk.lacking.SP.props, 'Early EC Prog' = c(0))
+rm(sobj.lacking) # remove object we don't need
+# Now find the true proportions of all cells
+tue.prop.SP <- prop.table(table(Idents(sobj)))
+tue.prop.SP <- as.data.frame(tue.prop.SP) # make data frame
+rownames(tue.prop.SP) <- tue.prop.SP$Var1
+tue.prop.SP$Var1 <- NULL
+
+### Make new subset with increased EEC cell-type
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sobj.EEC <- subset(sobj, idents = c("EEC")) # Invert = TURE so that we subset without the celltype instead of with celltype
+# Merge the EECs multiple times so that we have a lot more EECs
+sobj.increased.EEC <- merge(x= sobj.EEC, y=sobj) # Make new Suerat object that we want to substitute with more EECs
+sobj.increased.EEC10 <- merge(x= sobj.EEC, y=sobj.increased.EEC)
+sobj.increased.EEC20 <- merge(x= sobj.EEC, y=sobj.increased.EEC10)
+sobj.increased.EEC25 <- merge(x= sobj.EEC, y=sobj.increased.EEC20)
+# lets increase the EECs it a little faster
+rm(sobj.EEC) # remove old one
+sobj.EEC <- subset(sobj.increased.EEC25, idents = c("EEC")) # make new one with more EECs
+# Now add more EECs
+sobj.increased.EEC50 <- merge(x= sobj.EEC, y=sobj.increased.EEC25)
+sobj.increased.EEC75 <- merge(x= sobj.EEC, y=sobj.increased.EEC50)
+sobj.increased.EEC100 <- merge(x= sobj.EEC, y=sobj.increased.EEC75)
+# Now remove all the crap to save memory
+rm(sobj.increased.EEC)
+rm(sobj.increased.EEC10)
+rm(sobj.increased.EEC20)
+rm(sobj.increased.EEC25)
+rm(sobj.increased.EEC50)
+rm(sobj.increased.EEC75)
+rm(sobj.EEC) # remove old one
+gc(reset = TRUE) # clean memory
+# AND ADDDDD MMMOOOOOOOOOOAAARRR!!!!!!! hehehe
+sobj.EEC <- subset(sobj.increased.EEC100, idents = c("EEC"))
+sobj.increased.EEC200 <- merge(x= sobj.EEC, y=sobj.increased.EEC100)
+sobj.increased.EEC300 <- merge(x= sobj.EEC, y=sobj.increased.EEC200)
+sobj.increased.EEC400 <- merge(x= sobj.EEC, y=sobj.increased.EEC300)
+# remove old things againd and clear memmory
+rm(sobj.increased.EEC100)
+rm(sobj.increased.EEC200)
+rm(sobj.increased.EEC300)
+rm(sobj.EEC) 
+gc(reset = TRUE) 
+# Make bulk and convert to matrix
+bulk.increased.EEC <- AggregateExpression(object = sobj.increased.EEC400, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.increased.EEC <- as.matrix(bulk.increased.EEC$RNA)
+# change the col names to my liking...
+colnames(bulk.increased.EEC) <- c("increased.EEC400")
+# Now find the true proportions of more EECs
+Idents(sobj.increased.EEC400) <- "cellID" 
+bulk.increased.EEC.props <- prop.table(table(Idents(sobj.increased.EEC400)))
+bulk.increased.EEC.props <- as.data.frame(bulk.increased.EEC.props) # make data frame
+rm(sobj.increased.EEC400) # remove object we don't need
+# Now find the true proportions of all cells
+tue.prop.EEC <- prop.table(table(Idents(sobj)))
+tue.prop.EEC <- as.data.frame(tue.prop.EEC) # make data frame
+rownames(tue.prop.EEC) <- tue.prop.EEC$Var1
+tue.prop.EEC$Var1 <- NULL
+
+# Make a new subset with increased TAC (or anything we like)
+sobj <- sobj.org
+Idents(sobj) <- "cellID" # make the cell ids the idents
+sobj.EEC <- subset(sobj, idents = c("Prolific TAC")) # Invert = TURE so that we subset without the celltype instead of with celltype
+# Merge the EECs multiple times so that we have a lot more EECs
+sobj.increased.EEC <- merge(x= sobj.EEC, y=sobj) # Make new Suerat object that we want to substitute with more EECs
+sobj.increased.EEC10 <- merge(x= sobj.EEC, y=sobj.increased.EEC)
+sobj.increased.EEC20 <- merge(x= sobj.EEC, y=sobj.increased.EEC10)
+sobj.increased.EEC25 <- merge(x= sobj.EEC, y=sobj.increased.EEC20)
+rm(sobj.increased.EEC10)
+rm(sobj.increased.EEC20)
+# Make bulk and convert to matrix
+bulk.increased.EEC <- AggregateExpression(object = sobj.increased.EEC25, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.increased.EEC <- as.matrix(bulk.increased.EEC$RNA)
+# change the col names to my liking...
+colnames(bulk.increased.EEC) <- c("increased.EEC400")
+# Now find the true proportions of more EECs
+bulk.increased.EEC.props <- prop.table(table(Idents(sobj.increased.EEC25)))
+bulk.increased.EEC.props <- as.data.frame(bulk.increased.EEC.props) # make data frame
+# Now find the true proportions of all cells
+tue.prop.EEC <- prop.table(table(Idents(sobj)))
+tue.prop.EEC <- as.data.frame(tue.prop.EEC) # make data frame
+rownames(tue.prop.EEC) <- tue.prop.EEC$Var1
+tue.prop.EEC$Var1 <- NULL
+
+### Make new subset with Tuft cells cell-type, a new cell type indeed!
+Idents(sobj.tiss) <- "cellID" # make the cell ids the idents for tissue
+sobj <- sobj1 # and import organoid
+Idents(sobj) <- "cellID" # make the cell ids the idents
+# Import Tissue data to add tuft cells to organoid. (WE NO LONGER USE MACHINE LEARNING TO LEARN TUFT CELLS, This is cheaper)
+tuft <- subset(sobj.tiss, idents = c("TC *"))
+# Merge the Tuft cells with the the organoid 
+sobj.increased.TC <- merge(x= tuft, y=sobj) # Make new Suerat object that we want to substitute with more tuft cells
+sobj.increased.TC1 <- merge(x= tuft, y=sobj.increased.TC)
+sobj.increased.TC2 <- merge(x= tuft, y=sobj.increased.TC1)
+sobj.increased.TC3 <- merge(x= tuft, y=sobj.increased.TC2)
+# Now remove all the object we dont need and free up some memmory
+rm(sobj.increased.TC)
+rm(sobj.increased.TC1)
+rm(sobj.increased.TC2)
+rm(tuft)
+gc(reset = TRUE) 
+# Make bulk and convert to matrix
+sobj.increased.TC3$cell.origin <- NULL # first make sure that we make them all organoid and remove tissue label 
+sobj.increased.TC3$cell.origin <- "Ileum Org"
+bulk.added.TC <- AggregateExpression(object = sobj.increased.TC3, group.by = "cell.origin",  slot = "counts") # We group by cell.origin to take the whole data
+bulk.added.TC <- as.matrix(bulk.added.TC$RNA)
+# change the col names to my liking...
+colnames(bulk.added.TC) <- c("added.TC")
+# Now find the true proportions of more TCs
+bulk.added.TC.props <- prop.table(table(Idents(sobj.increased.TC3)))
+bulk.added.TC.props <- as.data.frame(bulk.added.TC.props) # make data frame
+rm(sobj.increased.TC3) # remove object we don't need
+gc(reset = TRUE) 
+# Now find the true proportions of all cells
+true.prop.TC <- prop.table(table(Idents(sobj)))
+true.prop.TC <- as.data.frame(true.prop.TC) # make data frame
+rownames(true.prop.TC) <- true.prop.TC$Var1
+true.prop.TC$Var1 <- NULL
+
+
+######### Now combine all the bulks (including bulk reference######### 
+
+### Now combine the Pseudobulks (this works if the dimensions are the same)
+rm(comb)
+comb <- cbind(bulk1.2, bulk3, bulk.lacking.EC, bulk.lacking.SP, bulk.increased.EEC)
+comb <- as.matrix(comb) 
+dim(comb)
+
+# append the TCs in the comb if available
+comb <- merge(comb, bulk.added.TC,  by = "row.names", all = F) # add the bulk.lacking.RC
+rownames(comb) <- comb$Row.names # add gnees as rows
+comb$Row.names <- NULL # and remove the columns that we dont need
+comb <- as.matrix(comb) 
+dim(comb)
+
+######### DECONVOLUTE #########
+
+### Convert the Pseudo bulk matrix to an standard ExpressionSet
+bulk.eset <- Biobase::ExpressionSet(assayData = comb) #comb
+sampleNames(bulk.eset) # and check names of the Bulk set
+### Combine the single cell reference ExpressionSets
+sc.eset <- combine(sc.eset1.2, sc.eset3)
+sc.eset$SubjectName # and check names of the Reference set
+
+### Run reference based deconvolution
+res <- BisqueRNA::ReferenceBasedDecomposition(bulk.eset, sc.eset, markers=NULL, use.overlap=T)
+### Analyzing the deconvolution and estimated proportions in the bulk:
+ref.based.BULK.estimates <- res$bulk.props
+ref.sc.estimates <- res$sc.props
+# Print results
+ref.based.BULK.estimates
+ref.sc.estimates 
+
+
+###### PLOT PROPORTINS of REF vs BULK ######
+
+cell_type.sum.leveled <- c('Prolific Stem/Prog', 'Prolific TAC', 'TAC', 'Early EC Prog', 'Late EC Prog', "PC", "GC", "EEC", 'Renewing EC', 'Developing EC', 'Undeveloped EC', 'Early Immature EC', 'Late Immature EC', 'Migrating EC (Villous Tips)', 'Semi-Mature EC', 'Resting Cells')
+
+
+### Make data frame of cell type proportions for the true proportion of the simulated bulk
+data.proportions.ref <- data.frame(bulk.lacking.EC.props)
+data.proportions.ref
+# Make new data frame with the values and add the celltypes as rows for ref 1 and ref 2
+data.proportions.ref1 <- data.frame(rownames(data.proportions.ref), bulk.lacking.EC.props$Freq)
+colnames(data.proportions.ref1)[2] <- "proportions_vec"
+colnames(data.proportions.ref1)[1] <- "cellID"
+# Add new columns to know the origin
+data.proportions.ref1$origin[1:length(rownames(data.proportions.ref1))] <- "True Proportion"
+
+data.proportions.ref <- data.frame(bulk.lacking.SP.props)
+data.proportions.ref
+data.proportions.ref2 <- data.frame(rownames(data.proportions.ref), bulk.lacking.SP.props$Freq)
+colnames(data.proportions.ref2)[2] <- "proportions_vec"
+colnames(data.proportions.ref2)[1] <- "cellID"
+data.proportions.ref2$origin[1:length(rownames(data.proportions.ref2))] <- "True Proportion"
+
+data.proportions.ref <- data.frame(bulk.increased.EEC.props)
+data.proportions.ref
+rownames(data.proportions.ref) <- data.proportions.ref$Var1 # when adding cells, we must fix th rownmaes
+data.proportions.ref3 <- data.frame(rownames(data.proportions.ref), bulk.increased.EEC.props$Freq)
+colnames(data.proportions.ref3)[2] <- "proportions_vec"
+colnames(data.proportions.ref3)[1] <- "cellID"
+data.proportions.ref3$origin[1:length(rownames(data.proportions.ref3))] <- "True Proportion"
+
+# for added TC
+data.proportions.ref <- data.frame(bulk.added.TC.props)
+data.proportions.ref
+rownames(data.proportions.ref) <- data.proportions.ref$Var1 # when adding cells, we must fix th rownmaes
+data.proportions.ref4 <- data.frame(rownames(data.proportions.ref), bulk.added.TC.props$Freq)
+colnames(data.proportions.ref4)[2] <- "proportions_vec"
+colnames(data.proportions.ref4)[1] <- "cellID"
+data.proportions.ref4$origin[1:length(rownames(data.proportions.ref4))] <- "True Proportion"
+data.proportions.ref4
+
+
+
+
+### Make data frame of cell type proportions for the true proportion of all cells
+data.proportions.all <- data.frame(tue.prop.EC)
+data.proportions.all
+# Make new data frame with the values and add the celltypes as rows for ref 1 and ref 2
+data.proportions.ref1.1 <- data.frame(rownames(data.proportions.all), tue.prop.EC$Freq)
+colnames(data.proportions.ref1.1)[2] <- "proportions_vec"
+colnames(data.proportions.ref1.1)[1] <- "cellID"
+# Add new columns to know the origin
+data.proportions.ref1.1$origin[1:length(rownames(data.proportions.ref1.1))] <- "Full Proportion"
+
+data.proportions.all <- data.frame(tue.prop.SP)
+data.proportions.all
+data.proportions.ref2.1 <- data.frame(rownames(data.proportions.all), tue.prop.SP$Freq)
+colnames(data.proportions.ref2.1)[2] <- "proportions_vec"
+colnames(data.proportions.ref2.1)[1] <- "cellID"
+data.proportions.ref2.1$origin[1:length(rownames(data.proportions.ref2.1))] <- "Full Proportion"
+
+data.proportions.all <- data.frame(tue.prop.EEC)
+data.proportions.all
+data.proportions.ref3.1 <- data.frame(rownames(data.proportions.all), tue.prop.EEC$Freq)
+colnames(data.proportions.ref3.1)[2] <- "proportions_vec"
+colnames(data.proportions.ref3.1)[1] <- "cellID"
+data.proportions.ref3.1$origin[1:length(rownames(data.proportions.ref3.1))] <- "Full Proportion"
+
+data.proportions.all <- data.frame(true.prop.TC)
+data.proportions.all
+data.proportions.ref4.1 <- data.frame(rownames(data.proportions.all), true.prop.TC$Freq)
+colnames(data.proportions.ref4.1)[2] <- "proportions_vec"
+colnames(data.proportions.ref4.1)[1] <- "cellID"
+data.proportions.ref4.1$origin[1:length(rownames(data.proportions.ref4.1))] <- "Full Proportion"
+
+
+
+
+### Also make one for deconvoluted bulk simulation
+data.proportions.bulk <- data.frame(ref.based.BULK.estimates)
+data.proportions.bulk
+# Make new data frame with the values and add the celltypes as rows for ref 1 and ref 2
+data.proportions.bulk1 <- data.frame(rownames(data.proportions.bulk), data.proportions.bulk$No.ECs)
+colnames(data.proportions.bulk1)[2] <- "proportions_vec"
+colnames(data.proportions.bulk1)[1] <- "cellID"
+# Add new columns to know the origin
+data.proportions.bulk1$origin[1:length(rownames(data.proportions.bulk1))] <- "deconvoluted"
+
+data.proportions.bulk <- data.frame(ref.based.BULK.estimates)
+data.proportions.bulk
+data.proportions.bulk2 <- data.frame(rownames(data.proportions.bulk), data.proportions.bulk$No.SPs)
+colnames(data.proportions.bulk2)[2] <- "proportions_vec"
+colnames(data.proportions.bulk2)[1] <- "cellID"
+data.proportions.bulk2$origin[1:length(rownames(data.proportions.bulk2))] <- "deconvoluted"
+
+data.proportions.bulk <- data.frame(ref.based.BULK.estimates)
+data.proportions.bulk
+data.proportions.bulk3 <- data.frame(rownames(data.proportions.bulk), data.proportions.bulk$increased.EEC400)
+colnames(data.proportions.bulk3)[2] <- "proportions_vec"
+colnames(data.proportions.bulk3)[1] <- "cellID"
+data.proportions.bulk3$origin[1:length(rownames(data.proportions.bulk3))] <- "deconvoluted"
+
+data.proportions.bulk <- data.frame(ref.based.BULK.estimates)
+data.proportions.bulk
+data.proportions.bulk4 <- data.frame(rownames(data.proportions.bulk), data.proportions.bulk$added.TC)
+colnames(data.proportions.bulk4)[2] <- "proportions_vec"
+colnames(data.proportions.bulk4)[1] <- "cellID"
+data.proportions.bulk4$origin[1:length(rownames(data.proportions.bulk4))] <- "deconvoluted"
+
+
+
+
+# Now we append them within each other and sort
+merged.proportions1 <- rbind( data.proportions.bulk1, data.proportions.ref1, data.proportions.ref1.1)
+merged.proportions1 <- merged.proportions1[order(merged.proportions1$cellID, decreasing = TRUE), ]
+merged.proportions1$proportions_vec <- as.numeric(merged.proportions1$proportions_vec) # Make the "proportions_vec" column as numerical
+merged.proportions1
+
+merged.proportions2 <- rbind(data.proportions.bulk2, data.proportions.ref2, data.proportions.ref2.1)
+merged.proportions2 <- merged.proportions2[order(merged.proportions2$cellID, decreasing = TRUE), ]
+merged.proportions2$proportions_vec <- as.numeric(merged.proportions2$proportions_vec) # Make the "proportions_vec" column as numerical
+merged.proportions2
+
+merged.proportions3 <- rbind(data.proportions.bulk3, data.proportions.ref3, data.proportions.ref3.1)
+merged.proportions3 <- merged.proportions3[order(merged.proportions3$cellID, decreasing = TRUE), ]
+merged.proportions3$proportions_vec <- as.numeric(merged.proportions3$proportions_vec) # Make the "proportions_vec" column as numerical
+merged.proportions3
+
+merged.proportions4 <- rbind(data.proportions.bulk4, data.proportions.ref4, data.proportions.ref4.1)
+merged.proportions4 <- merged.proportions4[order(merged.proportions4$cellID, decreasing = TRUE), ]
+merged.proportions4$proportions_vec <- as.numeric(merged.proportions4$proportions_vec) # Make the "proportions_vec" column as numerical
+merged.proportions4
+
+
+# plot bars for cell type proportions between deconvoluted bulk and single cell reference
+ggplot(merged.proportions1, aes(x = factor(cellID,  levels = cell_type.sum.leveled), y = proportions_vec*100, fill = origin)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, colour = "black", width = 0.8) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.5) # + theme(legend.position = c(0.1, 0.75))
+# plot bars for cell type proportions between deconvoluted bulk and single cell reference
+ggplot(merged.proportions2, aes(x = factor(cellID,  levels = cell_type.sum.leveled), y = proportions_vec*100, fill = origin)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, colour = "black", width = 0.8) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.5) # + theme(legend.position = c(0.1, 0.75))
+ggplot(merged.proportions3, aes(x = factor(cellID,  levels = cell_type.sum.leveled), y = proportions_vec*100, fill = origin)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, colour = "black", width = 0.8) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.5) # + theme(legend.position = c(0.1, 0.75))
+ggplot(merged.proportions4, aes(x = factor(cellID,  levels = cell_type.sum.leveled), y = proportions_vec*100, fill = origin)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, colour = "black", width = 0.8) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.5) # + theme(legend.position = c(0.1, 0.75))
+
+
+
+##### finding the convoluted cells ######
+
+
+### Lets do a linear regression and see which genes we find to be significantly as outlier, (hopefully the model can find tuft cells)
+# import the linearly transformed BULK that was fit on the reference
+linear.transformed.BULK <- res$transformed.bulk 
+linear.transformed.BULK <- as.data.frame(linear.transformed.BULK) # make DF
+# Now take the bulks used for that were used under deconvolution (not reference BULK!)
+# We will take the largest one for now, as this one contains all the organoid cells we know
+# I do not expect this to be very different in real bulk data, as it gets linearly transformed anyway
+# Real bulk data is likley less linear when compared to our simulated data
+
+# Now take the non-transformed simulated TC data an put in a DF (we used the normalized values here as it was used in Bisque)
+Idents(sobj.tiss) <- "cellID" # make the cell ids the idents for tissue
+sobj <- sobj.org # and import organoid
+Idents(sobj) <- "cellID" # make the cell ids the idents
+# Import Tissue data to add tuft cells to organoid. (WE NO LONGER USE MACHINE LEARNING TO LEARN TUFT CELLS, This is cheaper)
+tuft <- subset(sobj.tiss, idents = c("TC *"))
+# Merge the Tuft cells with the the organoid 
+sobj.increased.TC <- merge(x= tuft, y=sobj) # Make new Suerat object that we want to substitute with more tuft cells
+sobj.increased.TC1 <- merge(x= tuft, y=sobj.increased.TC)
+sobj.increased.TC2 <- merge(x= tuft, y=sobj.increased.TC1)
+sobj.increased.TC3 <- merge(x= tuft, y=sobj.increased.TC2)
+# Now remove all the object we dont need and free up some memmory
+rm(sobj.increased.TC)
+rm(sobj.increased.TC1)
+rm(sobj.increased.TC2)
+rm(tuft)
+gc(reset = TRUE) 
+# Make bulk and convert to matrix
+sobj.increased.TC3$cell.origin <- NULL # first make sure that we make them all organoid and remove tissue label 
+sobj.increased.TC3$cell.origin <- "Ileum Org"
+sobj.increased.TC3 <- NormalizeData(sobj.increased.TC3, normalization.method = "LogNormalize", scale.factor = 200) # scale factor
+bulk.added.TC <- AggregateExpression(object = sobj.increased.TC3, group.by = "cell.origin",  slot = "data") 
+bulk.added.TC <- as.matrix(bulk.added.TC$RNA)
+# change the col names to my liking...
+colnames(bulk.added.TC) <- c("added.TC")
+# Now find the true proportions of more TCs
+bulk.added.TC.props <- prop.table(table(Idents(sobj.increased.TC3)))
+bulk.added.TC.props <- as.data.frame(bulk.added.TC.props) # make data frame
+rm(sobj.increased.TC3) # remove object we don't need
+gc(reset = TRUE) 
+# put in DF
+bulk.added.TC <- as.data.frame(bulk.added.TC)
+colnames(bulk.added.TC) <- "addedTC.noLM"
+# CPM normalize
+#for (i in 1:length(x = bulk.added.TC$addedTC.noLM)) {
+#  bulk.added.TC$addedTC.noLM[i] <- bulk.added.TC$addedTC.noLM[i] / sum(bulk.added.TC$addedTC.noLM) * 1000000
+#}
+
+# put the transformed bulks and the non-transformed BULK in a list
+combine.bulks.transfomation <- merge(linear.transformed.BULK, bulk.added.TC,  by = "row.names", all = F) 
+rownames(combine.bulks.transfomation) <- combine.bulks.transfomation$Row.names
+combine.bulks.transfomation$Row.names <- NULL
+#colnames(combine.bulks.transfomation)[5] <- "bulkref" # remove numbers as rownames
+
+#check the ecxpression of genes of interest
+combine.bulks.transfomation["VAV1",]
+combine.bulks.transfomation["CCL5",]
+combine.bulks.transfomation["CD52",]
+combine.bulks.transfomation["ACTB",]
+
+combine.bulks.transfomation["ACTB",]
+combine.bulks.transfomation["AGR2",]
+combine.bulks.transfomation["ATP6",]
+combine.bulks.transfomation["ND4",]
+combine.bulks.transfomation["CCL5",]
+combine.bulks.transfomation["FABP6",]
+
+combine.bulks.transfomation
+# Carry out a linear regression analysis on the two data using the normal gausian distribution
+result_reg = lm(addedTC.noLM~added.TC, combine.bulks.transfomation) # if you use a linear model
+# save the residuals and fitted line
+combine.bulks.transfomation$predicted <- predict(result_reg)  
+combine.bulks.transfomation$residuals <- residuals(result_reg)
+combine.bulks.transfomation$sresiduals <- abs(result_reg$residuals/sdevation)
+
+# Calculate the standard deviation of the residuals
+sdevation=sqrt(sum(result_reg$residuals^2)/result_reg$df.residual) #  standard deviation of the residuals of your model
+# Compute the standardized residuals and identify which of these have an absolute value  larger than 2
+select.genes=which(abs(result_reg$residuals/sdevation)>=3) # 2 = 95CI, 3 = 99 in gausian distributioon
+select.genes <- as.data.frame(select.genes)
+# Check some genes in the list
+select.genes["CCL5",]
+
+# Plot the lineat model
+ggplot(combine.bulks.transfomation, aes(y=combine.bulks.transfomation$addedTC.noLM, x=combine.bulks.transfomation$added.TC)) + 
+  geom_point( size=1) +
+  geom_smooth(method = "lm", color='turquoise4', size=0.5, se = T, fullrange=TRUE) + 
+  ylab("nonLT-TC Genes") + 
+  xlab("LT-TCdecon Genes") + 
+  theme_bw() + # make filler white
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # remove raster
+  NoLegend() +
+  ylim(0, 200) +
+  xlim(0, 200) 
+
+# Plot the statistical model
+# With the maximum outlier removed for representation
+
+# just for representation of color grading, remove the FABP6, as this one had very large expression and dominates over
+combine.bulks.transfomation <- combine.bulks.transfomation[combine.bulks.transfomation$sresiduals!=max(combine.bulks.transfomation$sresiduals),]
+
+ggplot(combine.bulks.transfomation, aes(y=combine.bulks.transfomation$addedTC.noLM, x=combine.bulks.transfomation$added.TC)) + 
+  geom_smooth(method = "lm", color='turquoise4', size=0.5, se = T) + 
+  ylab("nonLT-TC Genes") + 
+  xlab("LT-TCdecon Genes") + 
+  geom_segment(aes(xend = combine.bulks.transfomation$added.TC, yend = predicted), alpha = .2) +
+  geom_point(aes(color = sresiduals)) +  # Color mapped here
+  scale_color_gradient2(low = "blue", mid = "grey30", high = "red") +  # Colors to use here
+  guides(color = FALSE) +
+  geom_point(aes(color = abs(sresiduals), size = abs(sresiduals))) + # original   geom_point(aes(color = abs(residuals), size = abs(residuals))) +
+  theme_bw() + # make filler white
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # remove raster
+  NoLegend() +
+  ylim(0, 1000) +
+  xlim(0, 1000) 
+
+
+# now show a subset that is likely related the expression of new markers. Lets focus on zero counts for the transformed data
+combine.bulks.transfomation <- subset(combine.bulks.transfomation, combine.bulks.transfomation$added.TC < 50 & combine.bulks.transfomation$added.TC > 0)
+# Make a model again
+result_reg = lm(addedTC.noLM~added.TC, combine.bulks.transfomation) # if you use a linear model
+# save the residuals and fitted line
+combine.bulks.transfomation$predicted <- predict(result_reg)  
+combine.bulks.transfomation$residuals <- residuals(result_reg)
+sdevation=sqrt(sum(result_reg$residuals^2)/result_reg$df.residual)
+combine.bulks.transfomation$sresiduals <- abs(result_reg$residuals/sdevation)
+
+# Calculate the standard deviation of the residuals
+sdevation=sqrt(sum(result_reg$residuals^2)/result_reg$df.residual) #  standard deviation of the residuals of your model
+# Compute the standardized residuals and identify which of these have an absolute value  larger than 2
+select.genes=which(abs(result_reg$residuals/sdevation)>=5) # 5 = 99.99CI, 3 = 99 in gausian distributioon
+select.genes <- as.data.frame(select.genes)
+ggplot(combine.bulks.transfomation, aes(y=combine.bulks.transfomation$addedTC.noLM, x=combine.bulks.transfomation$added.TC)) + 
+  geom_smooth(method = "lm", color='turquoise4', size=0.5, se = T) + 
+  ylab("nonLT-TC Genes") + 
+  xlab("LT-TCdecon Genes") + 
+  geom_segment(aes(xend = combine.bulks.transfomation$added.TC, yend = predicted), alpha = .2) +
+  geom_point(aes(color = sresiduals)) +  # Color mapped here
+  scale_color_gradient2(low = "blue", mid = "black", high = "red") +  # Colors to use here
+  guides(color = FALSE) +
+  geom_point(aes(color = abs(sresiduals), size = abs(sresiduals))) + # original   geom_point(aes(color = abs(residuals), size = abs(residuals))) +
+  theme_bw() + # make filler white
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + # remove raster
+  NoLegend() 
+# Check the genes again
+select.genes # We find CCL5 and CD52 again, so thats good!
+
+
+# Extract the top 10 dispersed gene. aming them is CCL5 TUFT marker
+rownames(select.genes)[1:10]
+select.genes
+
+# Now lets see if we can find celltypes associated with these genes
+#Accessing the list of available samples
+samplesList <- getSampleList()
+
+scSRS2119548 <- getSampleComposition(srs = 'SRS1876784')
+(scSRS2119548)
+#check for markers, we can include and exclude
+BEC <- getMarkers(include = c('CCL5'), exclude = "") # or use rownames(select.genes)[1:10] to find a combination of genes
+(BEC)
+
+FeaturePlot(sobj.tiss, features = c("CCL5", "CD52"),cols = c("grey", "red"),  pt.size = 0.5, reduction = "umap", label = F) + ylab("UMAP 1") + xlab("UMAP 2")
+
+FeaturePlot(sobj, features = c("CCL5", "CD52"),cols = c("grey", "red"),  pt.size = 0.5, reduction = "umap", label = F) + ylab("UMAP 1") + xlab("UMAP 2")
+```

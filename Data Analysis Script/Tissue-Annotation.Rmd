@@ -1,0 +1,1430 @@
+---
+title: "Tissue Annotation"
+output: html_notebook
+---
+
+# In the chuck below, we load in all the essential libraries for the data analysis. 
+```{r Load Libraries, echo=FALSE, results=FALSE, include=FALSE}
+library(dplyr)
+library(dbplyr)
+library(Seurat)
+library(SeuratDisk)
+library(SeuratData)
+library(patchwork) # Also being used for Cellchat (but main purpose was something else)
+library(hdf5r)
+library(tidyverse)
+library(gsubfn)
+library(ggplot2)
+library(RColorBrewer)
+library(writexl)
+
+# For annotation, gene name conversions
+library(rPanglaoDB)
+library(AnnotationHub)
+library(ensembldb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(org.Ss.eg.db)
+library(DropletUtils)
+library(biomaRt)
+
+# to download external library
+library(devtools)
+
+# for Monocle3
+library(SeuratWrappers)
+library(monocle3)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork) # also used for cellchat 
+
+# co-expression network analysis packages:
+# NOTE: DOWNLAOD THE "FORTRAN compiler" on Mac systems using ARM64. This compiler is not integrated in Xcode.
+library(qlcMatrix)  
+library(impute) 
+library(preprocessCore) 
+library(WGCNA)
+library(hdWGCNA)
+
+# deconvolution
+library(Biobase) # install this package if needed (for simulated data)
+library(BisqueRNA)
+
+# Cellchat and dependencies:
+library(NMF)
+library(circlize)
+library(ComplexHeatmap)
+library(presto)
+library(CellChat)
+```
+
+#################### Opening the files ####################
+
+```{r, opening the Seurat object, echo=FALSE}
+# load Seurat object from patch
+parent_directory = "/Users/hamid/Desktop/ABG MSc project/Raw data/Ileum tissue/Wiarda - Ileum Tissue (non-immune)"
+project_name = "Ileum Tissue (WIARDA et al., 2023)"
+
+sobj.WIARDA <- LoadH5Seurat("Ileum_NonImmuneOnly.h5seurat")
+raw <- as.matrix(sobj.WIARDA@assays$RNA@counts)
+rm(sobj.WIARDA)
+sobj <- CreateSeuratObject(counts = raw, assay = "RNA", project = "ileum_Tiss", min.cells = 0, min.features = 0)
+rm(raw)
+
+# UPDATE GENE NAMES
+# Connect to the sscrofa database using mart
+ensembl <- useMart("ensembl", dataset="sscrofa_gene_ensembl") 
+# For all of our ensembl_gene_id, find all gene symbols
+bm <- getBM(attributes=c("ensembl_gene_id", "hgnc_symbol"), values=rownames(sobj), mart=ensembl) # requires dbplyr 2.3.4 (by installing and restarting R, then load library)
+# Find all the ENSEMBL ids in our Seurat object
+ENS <- rownames(sobj@assays$RNA@features)[c(grep("ENS", rownames(sobj)))]
+# Find the positions of our Seurat ENSEMBL ids in the bm output
+ENSEMBL_IDs.pos <- na.omit(c(match(c(paste(ENS)), bm[,1]))) # and remove NAs (ENS with no gene IDs)
+# Now find the GeneIDs in bm using the ENSEMBL_IDs.pos
+geneIDs <- bm[,2][ENSEMBL_IDs.pos] 
+# Since not all ENSEMBL_IDs have true gene name, we need to find the index of geneIDs with no gene name and remove their corresponding ENSEMBL_IDs
+# To do this, we will remove genes with no names, and then find the index of these genesID in bm in order to find the corresponding ENSEMBL ids
+geneIDs <- as.character(geneIDs[geneIDs !=""])
+# Ensure that we don't replace ENSEMBL ids with gene names that could result in duplicates
+duplicates <- generics::intersect(geneIDs, rownames(sobj)) # find duplicated between new gene-ids with existing ones in the Seurat object
+duplicates.pos <- c(match(c(paste(duplicates)), geneIDs)) # Find position of the duplicate
+geneIDs <- geneIDs[-duplicates.pos] # and remove the duplicate
+
+geneIDs.pos <- c(match(c(paste(geneIDs)), bm[,2])) # find position of gene IDs in them
+ENSEMBL_IDs <- bm[,1][geneIDs.pos] # find the ENSEMBL_IDs using the positions of the gene IDs
+# Now we have found all the ENSEMBL ids that have a annotated gene name (winch are also found in our Seurat object)
+# We will their final positions in our Seurat object and finally replace them with the true gene ID
+# NOTE: The order of the genes are conserved using the method above
+final.pos <- c(match(c(paste(ENSEMBL_IDs)), rownames(sobj)))
+# replace the name of that genes for all slots
+rownames(sobj@assays$RNA@features)[c(final.pos)] <- c(paste(geneIDs)) # In seurat V5 we only replace features and all slots will be updated
+
+# replace the name of that genes for all slots in Seurat V3/4
+#sobj@assays$RNA@counts@Dimnames[[1]][c(final.pos)] <- c(paste(geneIDs))
+#sobj@assays$RNA@data@Dimnames[[1]][c(final.pos)] <- c(paste(geneIDs))
+# rownames(sobj@assays[["RNA"]]@scale.data)[c(final.pos)] <- c(paste(geneIDs)) # This slot can only be adjusted after data scaling --- see later lines
+#rownames(sobj@assays$RNA@meta.features)[c(final.pos)] <- c(paste(geneIDs))
+
+print(sobj) # ASSERT CODE (REOMVE LATER!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!)
+
+# Change the name of the ENSSSCG00000026302 to MKI67 human homolog (w do this because of heatmap)
+MKI67_gene <- "ENSSSCG00000026302"
+# position/index of all genes for all slots
+genes <- rownames(sobj@assays$RNA@features)
+# find position of ENSSSCG00000026302
+MKI67.position.sobj <- c(match(c(paste(MKI67_gene)), genes))
+# replace the name of that gene to MKI67 for all slots (Seurat V5)
+rownames(sobj@assays$RNA@features)[c(MKI67.position.sobj)] <- c(paste("MKI67"))
+
+# replace the name of that gene to MUC2 fro all slots (Seruat V3/4)
+#sobj@assays$RNA@counts@Dimnames[[1]][[MKI67.position.sobj]] <- c(paste("MKI67")) 
+#sobj@assays$RNA@data@Dimnames[[1]][[MKI67.position.sobj]] <- c(paste("MKI67")) 
+#rownames(sobj@assays[["RNA"]]@scale.data)[MKI67.position.sobj] <- c(paste("MKI67")) # This slot can only be adjusted after data scaling --- see later lines
+#rownames(sobj@assays$RNA@meta.features)[MKI67.position.sobj] <- c(paste("MKI67"))
+```
+
+
+
+#################### Standard Workflow ####################
+
+# Wiarda et all have already gone throught the standar workflow, thus we will not do it again as their Seaurat object contains all metadata slots.
+# Since, we want to apply our own workflow, in the chuck below we will apply the our previous workflow starting with the normalization, feauture selection, sclaing, PCA, clustering and DGE analysis
+# For the clustering, we will analyze all clusters manually and select the best.
+```{r applying workflow on filtered data, fig.height=4, fig.width=5, echo=FALSE}
+# Normalization
+sobj <- NormalizeData(sobj, normalization.method = "LogNormalize", scale.factor = 10000) 
+# Most variable feature selection
+sobj <- FindVariableFeatures(sobj, selection.method = "vst", nfeatures = 2300) # 2500 genes seems suitable to find the essential clusters in ileum tissue
+# Scale the data
+all.genes.sobj <- rownames(sobj)
+sobj <- ScaleData(sobj, features = all.genes.sobj) 
+# PCA using selected features
+sobj <- RunPCA(sobj, features = VariableFeatures(object = sobj)) 
+pc.stdev.percentage <- sobj[["pca"]]@stdev / sum(sobj[["pca"]]@stdev) * 100 
+cumu.percentage <- cumsum(pc.stdev.percentage) 
+co1 <- which(cumu.percentage > 90 & pc.stdev.percentage < 5)[1] 
+co2 <- sort(which((pc.stdev.percentage[1:length(pc.stdev.percentage) - 1] - pc.stdev.percentage[2:length(pc.stdev.percentage)]) > 0.05), decreasing = T)[1]  
+pcs <- min(co1, co2) 
+pc.dims <- 1:pcs
+# UMAP/T-SNE clustering
+sobj <- FindNeighbors(sobj, dims = pc.dims)
+sobj <- FindClusters(sobj, resolution = c(1.0)) # Res 1.0 is final decision for Ileum Tissue 
+#sobj <- FindClusters(sobj, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0)) # Try several resolutions
+sobj <- RunUMAP(sobj, dims = pc.dims) # UMAP
+
+# plot UMAP and t-SNE at different resolutions
+#resolutionList <- grep("_snn_res", colnames(sobj@meta.data), value = TRUE) # copy patern of the resolutions
+#for (i in resolutionList) {
+#  plot_res_UMAP <- DimPlot(sobj, group.by = i, label = TRUE, pt.size = 0.05, reduction = 'umap') + ggtitle(paste(i, project_name, sep = " - ")) + ylab("UMAP 1") + xlab("UMAP 2")  
+#  print(plot_res_UMAP)
+#} 
+```
+
+
+# In the chuck below, we choose the preleminary cluster based on expectation and visualize
+```{r final cluster, fig.height=4, fig.width=5, echo=FALSE} 
+# setting final cluster
+Idents(sobj) <- "seurat_clusters" #1 stock
+DimPlot(sobj, reduction = 'umap', label = TRUE, pt.size = 0.1, ) + ggtitle(project_name, subtitle = paste("Preleminary Clustering Non-immune Cells (n = ", paste(dim(sobj)[2], ")", sep = ""))) + ylab("UMAP 1") + xlab("UMAP 2")
+
+# remove mesenchyme and endothelium
+#sobj <- subset(sobj, idents = c('4', '6'), invert = TRUE)
+```
+
+
+
+#################### DGE ANALYSIS ####################
+
+
+
+# Markers are being determined by the Wilxoc sum of ranks where the means of expression of one gene is compared to other clusters
+# min.pct determines that we want at least 10% of the cells between the groups to have a expression of that gene. The reason we are being little generous here is because not all genes will be detected in a cell, even if it is (highly) expressed.
+# We set Log2FC at 0.1 in order to detect low signal as well. This paramter determines the minimum log2 foldchange for average expression of gene in cluster relative to the average expression in all other clusters combined. Setting this too high will result in loss of signal, and too low could yield some ribosomal genes, but that is not a problem and can be igorned.
+# The min.diff.pct determines the minimum percent difference between the percent of cells expressing the gene in the cluster and the percent of cells expressing gene in all other clusters combined. Ideally we want a large difference between the cluster and the rest of the cluser, but, this could miss those cell markers that are expressed in all cells, but are highly up-regulated in this specific cell type. Therefore, we must manually inspect all genen. For this reason, we set this parameter on 0.25, but we will mannually look for large differences as well.
+# In the chuck below, we will also import annotation infromation and merge this with the DE gene table.
+```{r markers1, fig.height=3, fig.width=4, echo=FALSE}
+# Connect to AnnotationHub
+ann.hub <- AnnotationHub()
+# Access the Ensembl database for pig
+ann.hub.database <- query(ann.hub, pattern = c("Sus scrofa", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files ID
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+sobj.markers <- FindAllMarkers(sobj, only.pos = TRUE, min.pct = 0.15, logfc.threshold = 0.1) # min.diff.pct = 0.2
+sobj.markers <- subset(sobj.markers, p_val_adj < 0.05) # make sure the adjusted p-values are still < 0.05 since some genes in DE list have p_val_adj > 0.05
+markers <- sobj.markers %>% group_by(cluster) %>% slice_max(n = 200, order_by = avg_log2FC) # STOCK = 100
+features <- annotations[c("gene_biotype", "description", "gene_name")] # subset only the columns of gene symbols, Ensembl IDs, and the names used for analysis
+markers <- merge(markers,
+              features, 
+              by.x = "gene", 
+              by.y = "gene_name") # merge the DE gene lists with the additional gene information
+
+# Put markers per cluste rin data.frame and order them
+markers <- markers[order(markers$cluster, markers$p_val_adj),] # reorder by lowest to highest p-value within each cluster
+markers
+
+# lets save the markers for later
+if (dir.exists(file.path(parent_directory, "/Results/DE Markers"))) {
+  write_xlsx(data.frame(markers), paste(parent_directory, "/Results/DE Markers/markers.xlsx", sep = ""))
+} else {
+  dir.create(file.path(parent_directory, "/Results/DE Markers"), recursive = TRUE)
+  write_xlsx(data.frame(markers), paste(parent_directory, "/Results/DE Markers/markers.xlsx", sep = ""))
+}
+```
+
+
+#################### GO and KEGG on DGE genes ####################
+
+# In the two chuck below we will check each cluster by performing a GO and KEGG enrichments analysis.
+# Here we will focus on upregulated genes only as a first impression of the type of cells
+```{r GO enrichment on the DE genes, fig.height=15, fig.width=8, echo=FALSE}
+# Extract op genes of interest
+sobj.markers %>% group_by(cluster) %>% top_n(n = 100, wt = avg_log2FC) -> top100
+top100 <- top100[order(top100$cluster, top100$p_val_adj),] 
+top100
+
+# or all of them
+markers <- markers[order(markers$cluster, markers$p_val_adj),] # reorder by lowest to highest p-value within each cluster
+markers
+
+#Extract the markers that positive expression per cluster
+GO.KEGG.sampels.pos <- markers[,1:7]   # extract the top 30 genes and clusters containing only the positive Log2FC
+GO.KEGG.sampels.pos <- split(GO.KEGG.sampels.pos$gene, GO.KEGG.sampels.pos$cluster)
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the PIG database
+for (i in 1: length(GO.KEGG.sampels.pos)) {
+  GO.KEGG.sampels.pos[[i]] = bitr(GO.KEGG.sampels.pos[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db") # org.Hs.eg.db for human
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(GO.KEGG.sampels.pos)) {
+  genelist.all.pos[paste(i - 1)] <- list(GO.KEGG.sampels.pos[[i]]$ENTREZID)
+}
+
+# HUMANS DATABASE
+GOclusterplot.all.pos.hs <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Hs.eg.db", ont = 'BP', pvalueCutoff  = 0.05)
+dotplot(GOclusterplot.all.pos.hs, showCategory=4) + ggtitle(paste("GO: Up-regulated Markers", project_name, sep = " - ")) 
+# PIG DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers
+GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Ss.eg.db", ont = 'BP', pvalueCutoff  = 0.05)
+dotplot(GOclusterplot.all.pos, showCategory=4) + ggtitle(paste("GO: Up-regulated Markers", project_name, sep = " - ")) #+ coord_flip() + theme(axis.text.x = element_text(angle=90))
+```
+
+```{r KEGG enrichment on the DE genes, fig.height=7.5, fig.width=14, echo=FALSE}
+# PIG DATABSE
+# KEGG
+# suported orgnaism can ben found here: https://www.genome.jp/kegg/catalog/org_list.html
+KEGGclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "ssc", pvalueCutoff  = 0.05)
+dotplot(KEGGclusterplot.all.pos) + ggtitle(paste("KEGG: Up-regulated Markers", project_name, sep = " - ")) + coord_flip() + theme(axis.text.x = element_text(angle=90))
+
+# HUMANS DATABASE
+# KEGG
+#KEGGclusterplot.all.pos.hs <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "hsa", pvalueCutoff  = 0.05,)
+#dotplot(KEGGclusterplot.all.pos.hs) + ggtitle("KEGG - Hs: Up-regulated Markers - Pig Ileum Organoid") 
+```
+
+#################### Analysis and visualization of top 100 DEGs ###################
+
+# In the chuck below we make dotplots of DGE per cell type or subset
+```{r Dotplot, fig.height=30, fig.width=30, echo=FALSE}
+# Collect top DEGs of interest
+sobj.markers %>% group_by(cluster) %>% top_n(n = 100, wt = avg_log2FC) -> top100
+top100 <- top100[order(top100$cluster, top100$p_val_adj),] 
+top100
+
+# Dotplot
+DotPlot(sobj, features = top100, assay = "RNA", scale = T, scale.by = 'size') + scale_colour_gradient2(low = "blue", mid = "white", high = "red") +
+  RotatedAxis() +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.7)
+```
+
+# Heatmap
+```{r Heatmap, fig.height=9, fig.width=14, echo=FALSE}
+# Collect top DEGs of interest
+sobj.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC) -> top100
+top100 <- top100[order(top100$cluster, top100$p_val_adj),] 
+top100
+
+# Heatmap 
+DoHeatmap(subset(sobj, downsample = 200), features = top100, assay = "RNA", label = TRUE) + scale_fill_gradientn(colors = c("darkturquoise", "white", "red")) #+ NoLegend()
+```
+
+
+
+#################### Analysis and visualization of selected Markers ###################
+
+# In the chuck below we will display the most relevant DE or known marker genes per cluster
+```{r plot marker genes, fig.height=20, fig.width=20, echo=FALSE}
+#################### BASIC ANNOTATION ILEUM TISSUE (WIARDA) ###################
+
+# Pan Makers #
+####### Endothelium/stromal ########
+FeaturePlot(sobj, features = c("VWF", "PECAM1"), cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+VlnPlot(sobj, features = c("VWF", "PECAM1"), slot = 'counts', log = TRUE)
+# Mesenchyme cells #
+FeaturePlot(sobj, features = c("COL3A1", "COL1A1", "ACTA2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+VlnPlot(sobj, features = c("COL3A1", "COL1A1", "ACTA2"), slot = 'counts', log = TRUE)
+####### Epithelium ########
+FeaturePlot(sobj, features = c("EPCAM", "FABP6"),cols = c("grey", "red"), pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+VlnPlot(sobj, features = c("EPCAM", "FABP6", "EPCAM", "FABP6"), slot = 'counts', log = TRUE)
+
+# Epithelium #
+
+####### Enterocyte Prog ######## 
+# These cells also have enterocyte expression signature
+FeaturePlot(sobj, features = c("CENPF", "HMGB2", "TPX2", "UBE2C", "TOP2A", "MKI67"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# Actual Stem cells (Human, also Pig)
+FeaturePlot(sobj, features = c("OLFM4", "CDCA7", "SOX9"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+######## Panneth: Same as stem/prog cells, but with LYZ ########  
+FeaturePlot(sobj, features = c("LYZ", "PIGR", "SPINK1", "C3", "REG4"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")  
+
+####### Enterocyte ########  
+# These are genes related to metabolism and absorptive molecules
+FeaturePlot(sobj, features = c("FABP1", "FABP2", "SLC5A1", "APOA1", "APOA4", "ACE2", "SI", "FABP6"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# Enterocyte development genes (microphillus)
+FeaturePlot(sobj, features = c("ACTB", "PLS1", "VIL1" ,"EPS8", "EZR", "MYO6", "MYO1A", "KRT18", "KRT8", "KRT19"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap", label = TRUE) + ylab("UMAP 1") + xlab("UMAP 2") 
+# Other general Enterocyte markers, these do not seem to be expressed in ealy-enteroytes
+FeaturePlot(sobj, features = c("APOA4", "DPEP1", "ANPEP", "APOB", "ASS1", "FABP2", "APOC3", "RBP2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap", label = TRUE) + ylab("UMAP 1") + xlab("UMAP 2")
+
+####### BEST4 Enterocyte ########  
+FeaturePlot(sobj, features = c("CA7", "BEST4", "GUCA2B", "GUCA2A", "MEIS1", "OTOP2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+####### Enteroendocrine ########  
+FeaturePlot(sobj, features = c("NEUROD1", "CHGA", "CHGB", "PENK", "PYY", "CPE", "GCG"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+####### Tuft cells ########  
+FeaturePlot(sobj, features = c("CCL5", "CD52", "EPHB6", "DCLK1", "POU2F3", "PTGS1", "TRPM5", "VAV1", "HPGDS", "L1CAM", 'DAPI'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")  
+FeaturePlot(sobj, features = c("SOX9", "ALOX5", "AVIL", "DCLK1", "POU2F3", "PTGS1", "VAV1", "HPGDS", "L1CAM", 'DAPI'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")  
+
+####### Goblet ######## 
+FeaturePlot(sobj, features = c("TFF3", "REG4", "SPINK4", "CXCL8", "CLCA1", "MUC2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+####### Paneth #######  
+# Anti bacterial peptides RETNLB and XBP1 TF for paneth development: Paneth 
+FeaturePlot(sobj, features = c("RETNLB", "XBP1", "GUCA2A", "RRBP1", "LYZ"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2") 
+
+
+
+##########################################
+# These are genes expressed in Enterocytes for sugar absorption:
+# (Glucose, fructose, mannose, galactose)
+# SLC2 transporter. Not found: SLC2A1, SLC2A3, SLC2A4 and SLC2A14 not to be expressed at high levels and only in few cells.
+FeaturePlot(sobj, features = c("SLC2A1", "SLC2A2", "SLC2A3", "SLC2A4", "SLC2A5", "SLC2A7", "SLC2A9", "SLC2A10", "SLC2A11", "SLC2A12", "SLC2A13", "SLC2A14"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC5 transporter. Not found: SLC5A2, SLC5A5, SLC5A7. Not expressed in Enterocytes: SLC5A3, SLC5A4
+FeaturePlot(sobj, features = c("SLC5A1", "SLC5A2", "SLC5A3", "SLC5A4", "SLC5A5", "SLC5A6", "SLC5A7", "SLC5A8", "SLC5A12"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for amino acid absorption:
+# (Ala, Ser, Cys, Thr):
+# SLC1 transporter. Not found: SLC1A3, SLC1A6, SLC1A7. SLC1A2 and SLC1A4 not to be expressed at high levels and only in few cells.
+# SLC1A1 is late Enterocyte specific, and SLC1A5 is Stem/Prog/Gobl/Pan specific.
+FeaturePlot(sobj, features = c("SLC1A1", "SLC1A2", "SLC1A3", "SLC1A4", "SLC1A5", "SLC1A6", "SLC1A7"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Leu, Val, Gly, Ala, Ser, Glu, Cys)
+# SLC1 transporter.
+# SLC3A1 is late Enterocyte specific (some in early), SLC7A1 is Stem/Prog specific (in some early EC as well). SLC3A2 expressed in all cells
+FeaturePlot(sobj, features = c("SLC3A1", "SLC3A2", "SLC7A1"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC7 transporter. Not found: SLC7A3, SLC7A4, SLC7A13. SLC7A2, SLC7A8 and SLC7A10 not to be expressed at high levels and only in few cells.
+# SLC7A7 and SLC7A9 are Enterocyte specific (more in late, A9 also in some Endocrine). SLC7A5 and SLC7A11 are Stem/Prog specific.
+FeaturePlot(sobj, features = c("SLC7A2", "SLC7A3", "SLC7A4", "SLC7A5", "SLC7A7", "SLC7A8", "SLC7A9", "SLC7A10", "SLC7A11", "SLC7A13"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# (GABA, norepinephrine, dopamine, serotonin, Gly, Leu, Iso, Val, Pro)
+# SLC6 transporter. 
+FeaturePlot(sobj, features = c("SLC6A1", "SLC6A2", "SLC6A3", "SLC6A4", "SLC6A5", "SLC6A6", 'SLC6A7', 'SLC6A8', 'SLC6A9', 'SLC6A11', 'SLC6A12', 'SLC6A13', 'SLC6A14', 'SLC6A15', 'SLC6A18', 'SLC6A19', 'SLC6A20'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# (Ala, Glu, Ser, Gly, Met, Thr)
+# SLC38 transporter. Not found: SLC38A1. SLC38A4 not to be expressed at high levels and only in few cells.
+# SLC38A2 and SLC38A10 not specific expression
+FeaturePlot(sobj, features = c('SLC38A1', 'SLC38A2', 'SLC38A4', 'SLC38A10'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+#(Leu, Phe, Iso, Val, Me)
+# SLC43 transporter. Not found: SLC43A1. SLC43A3 not to be expressed at high levels and only in few cells.
+# SLC43A1 Late Enterocyte and Endocrine specific
+FeaturePlot(sobj, features = c('SLC43A1', 'SLC43A2', 'SLC43A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Vitamins absorption:
+# (Folates (e.g., 5‐methyl tetrahydrofolate, 5‐formyl tetrahydrofolate), thiamine)
+# SLC19 transporter. Not found: SLC19A1
+# SLC19A2 not specific and only expressed in fewer Gob/Pan. SLC19A3 only expressed in few late Enterocytes
+FeaturePlot(sobj, features = c('SLC19A1', 'SLC19A2', 'SLC19A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Ascorbate)
+# SLC23 transporter. Not found: SLC23A3. SLC23A1 not to be expressed at high levels and only in few cells.
+# SLC23A2 Late/Early Enterocyte specific but only in few cells
+FeaturePlot(sobj, features = c('SLC23A1', 'SLC23A2', 'SLC23A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Nucleotides/nucleosides absorption:
+# (Nucleotides/nucleosides)
+# SLC28 transporter. SLC28A3 not to be expressed at high levels and only in few cells.
+# SLC28A1 and SLC28A2 Late Enterocyte specific (some in early)
+FeaturePlot(sobj, features = c('SLC28A1' , 'SLC28A2', 'SLC28A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC29 transporter. Not found: SLC29A2, SLC29A4,
+# SLC29A1 Stem/Prog/Pan (little in Gob) specific. SLC29A3 not specific and expressed in few, but all cellstypes.
+FeaturePlot(sobj, features = c('SLC29A1', 'SLC29A2', 'SLC29A3', 'SLC29A4'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Bicarbonate ions and protons absorption:
+#(Bicarbonate ions and protons)
+# SLC4 transporter. Not found: SLC4A1, SLC4A3, SLC4A5, SLC4A9, SLC4A10. SLC4A8 not to be expressed at high levels and only in few cells.
+# SLC4A4 Prog/Early,Late Enterocyte specific (no stem). SLC4A7 secretory specific (incl Endocrine). SLC4A2 not specific and in all cellstypes.
+FeaturePlot(sobj, features = c('SLC4A1', 'SLC4A2', 'SLC4A3', 'SLC4A4', 'SLC4A5', 'SLC4A7', 'SLC4A8', 'SLC4A9', 'SLC4A10', 'SLC4A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC9 transporter. SLC9A3, SLC9A7, SLC9B2 not to be expressed at high levels and only in few cells.
+# SLC9A2 and SLC9A6 Early and Late Enterocyte specific, with SLC9A6 in fewer cells. SLC9A1 not specific and expressed in few, but all cellstypes.
+FeaturePlot(sobj, features = c('SLC9A1', 'SLC9A2', 'SLC9A3', 'SLC9A6', 'SLC9A7', 'SLC9B2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC26 transporter. Not found: SLC26A7, SLC26A9. SLC9A1, SLC26A3, SLC26A4, SLC26A5 and SLC26A11 not to be expressed at high levels and only in few cells.
+# SLC26A2 and SLC26A6 Early and Late Enterocyte specific.
+FeaturePlot(sobj, features = c('SLC26A1', 'SLC26A2', 'SLC26A3', 'SLC26A4', 'SLC26A5', 'SLC26A6', 'SLC26A7', 'SLC26A9', 'SLC26A11'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# These are genes expressed for Proton absorption:
+# (H+/peptide cotransporter)
+# SLC16 transporter.
+# Late enterocyte specific
+FeaturePlot(sobj, features = c("SLC15A1"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Calsium (CA2+) absorption:
+# SLC8 transporter. SLC8A2 and SLC8A3 not to be expressed at high levels and only in few cells.
+# SLC8A1 Late Enterocyte specific, but in few cells
+FeaturePlot(sobj, features = c('SLC8A1', 'SLC8A2', 'SLC8A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC24 transporter. Not found: SLC24A1, SLC24A2, SLC24A4 not to be expressed at high levels and only in few cells (Stem/Prog)
+FeaturePlot(sobj, features = c('SLC24A1', 'SLC24A2', 'SLC24A3', 'SLC24A4'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Inorganic ions (CL-) absorption:
+# SLC12 transporter. Not found: SLC12A1, SLC12A3, SLC12A5. SLC12A4, SLC12A6, SLC12A7 not expressed specifically and in few cells.
+# SLC12A2 Prog/Stem/Pan(some Gob) specific.
+FeaturePlot(sobj, features = c('SLC12A1', 'SLC12A2', 'SLC12A3', 'SLC12A4', 'SLC12A5', 'SLC12A6', 'SLC12A7'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Phosphate absorption:
+# (Sulfates, di‐ and tricarboxylates)
+# SLC13 transporter. Not found: SLC13A4, SLC13A5. SLC13A2 and SLC13A3 not expressed specifically and in few cells.
+# SLC13A1 Early/Late Enterocyte specific.
+FeaturePlot(sobj, features = c('SLC13A1', 'SLC13A2', 'SLC13A3', 'SLC13A4', 'SLC13A5'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+#(Monocarboxylates)
+# SLC16 transporter. Not found: SLC16A10. 
+# SLC16A7 Stem/Prog/Pan/Gob Specific, but not expressed in all cells
+# SLC16A1 and SLC16A3 Stem/Prog/Early Ent specific, but not expressed in all cells
+# SLC16A5 expressed in all cell types, but not too common
+FeaturePlot(sobj, features = c('SLC16A1', 'SLC16A2', 'SLC16A3', 'SLC16A4', 'SLC16A5', 'SLC16A6', 'SLC16A7', 'SLC16A8', 'SLC16A9', 'SLC16A10', 'SLC16A11', 'SLC16A12', 'SLC16A13'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Phosphate absorption:
+# (HPO4 2−, H2PO4 −)
+# SLC20 transporter. Not found: SLC20A.
+# SLC20A1 expressed in all cells
+FeaturePlot(sobj, features = c('SLC20A1' , 'SLC20A'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Inorganic phosphate)
+# SLC34 transporter. Not found: SLC34A1, SLC34A2
+# SLC34A3 Late enterocyte specific
+FeaturePlot(sobj, features = c('SLC34A1' , 'SLC34A2', 'SLC34A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Organic ions absorption:
+# (Urea)
+# SLC14 transporter. NONE FOUND!
+FeaturePlot(sobj, features = c('SLC14A1', 'SLC14A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Urate, prostaglandins, bile acids, α‐ketoglutarate, amines)
+# SLC22 transporter. Not found: SLC22A1, SLC22A2, SLC22A5, SLC22A6, SLC22A8, SLC22A9, SLC22A11, SLC22A12, SLC22A16, SLC22A24. No abvious expresseion in any of the cells
+FeaturePlot(sobj, features = c('SLC22A1', 'SLC22A2', 'SLC22A3', 'SLC22A4', 'SLC22A5', 'SLC22A6', 'SLC22A7', 'SLC22A8', 'SLC22A9', 'SLC22A11', 'SLC22A12', 'SLC22A13', 'SLC22A16', 'SLC22A17', 'SLC22A24'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Trace metals absorption:
+# (Fe2+, Mn2+, Cu2+, Co2+, Cd2+, Ni2+, Pb2+)
+# SLC11 transporter. 
+# SLC11A2 expressed in all cell types, but not found in all cells
+FeaturePlot(sobj, features = c('SLC11A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Zn2+)
+# SLC30 transporter. Not found: SLC30A2
+# SLC30A1 Late Entr specific, also in some early Entr
+# SLC30A10 Early and Late Entr specific 
+# SLC30A5 expressed in all cells
+FeaturePlot(sobj, features = c('SLC30A1', 'SLC30A2', 'SLC30A5', 'SLC30A10'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Cu2+)
+# SLC31 transporter. SLC31A2 not to be expressed at high levels and only in few cells.
+# SLC31A1 most highly expressed in mayority of Late Entr, but fewer in Stem/Prog/early Entr.
+FeaturePlot(sobj, features = c('SLC31A1' , 'SLC31A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Zn2+)
+# SLC39 transporter. Not found: SLC39A2, SLC39A14
+# SLC39A5 expressed in Stem/Prog, but higher in Early/Late Entr
+# SLC39A4 Stem/Prog/Early/Late Entr specific
+# SLC39A3, SLC39A8 and SLC39A10 Stem/Prog specific and also in very few Pan cells
+# SLC39A6 in Stem/Prog/Pan/Earl Entr, but only in few cells
+FeaturePlot(sobj, features = c('SLC39A1' , 'SLC39A2', 'SLC39A3', 'SLC39A4', 'SLC39A5', 'SLC39A6', 'SLC39A8', 'SLC39A10', 'SLC39A14'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Fe2+, Mn2+)
+# SLC40 transporter.
+# SLC40A1 Goblet specific, and in minor Late Entr as well
+FeaturePlot(sobj, features = c('SLC40A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Mg2+, Fe2+, Zn2+, Cu2+)
+# SLC41 transporter. ALL not to be expressed at high levels and only in few cells.
+FeaturePlot(sobj, features = c('SLC41A1', 'SLC41A2', 'SLC41A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Heme)
+# SLC49 transporter. Not found: SLC49A1
+FeaturePlot(sobj, features = c('SLC49A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Other organic compounds absorption:
+# (Bile acids, steroid hormones)
+# SLC10 transporter. Not found: SLC10A1, SLC10A4, SLC10A6. SLC10A5 and SLC10A7 not to be expressed at high levels and only in few cells.
+# SLC10A2 Late Entr specific
+FeaturePlot(sobj, features = c('SLC10A1', 'SLC10A2', 'SLC10A4', 'SLC10A5', 'SLC10A6', 'SLC10A7'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Wide variety of organic anions and cations)
+# SLCO transporter. Not found: SLCO1B1, SLCO1B3, SLCO1B7, SLCO1C1, SLCO4C1, SLCO5A1. Rest is not expressed at relevant levels
+# SLCO2A1 Goblet specific (prostaglandin transporter)
+FeaturePlot(sobj, features = c('SLCO1A2', 'SLCO1B1', 'SLCO1B3', 'SLCO1B7', 'SLCO1C1', 'SLCO2A1', 'SLCO2B1', 'SLCO3A1', 'SLCO4A1', 'SLCO4C1', 'SLCO5A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Fatty Acid binding and absorption:
+# FABP1, FABP6, FABP2 early and late enterocyte speicfic. (and Gobl)
+# FABP3 Stem/Prog specific (and endocrine)
+FeaturePlot(sobj, features = c('FABP1', 'FABP6', 'FABP2', 'FABP3', 'FABP4', 'FABP5', 'FABP7', 'FABP8', 'FABP9', 'FABP12.', "CRABP1", 'CRABP2', 'LCN1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# RBP2 Late Entr specific
+FeaturePlot(sobj, features = c('RBP1', 'RBP2', 'RBP3', 'RBP4', 'RBP5', 'RBP6', 'RBP7'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# Fatty Acid uptake
+# SLC27 transporter. Not found: SLC27A3, SLC27A5
+# SLC27A4 Late Entr specific (also in Gobl)
+# SLC27A2 Stem/Prog specific
+FeaturePlot(sobj, features = c('SLC27A1', 'SLC27A2', 'SLC27A3', 'SLC27A4', 'SLC27A5', 'SLC27A6'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+
+# METABOLISM and CONVERTIONS
+FeaturePlot(sobj, features = c("LPL", "GPX2", "OTC", "SERHL2", "S100G", "TST", "SORD", "AGPS", "IDH3B", "GALM"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+FeaturePlot(sobj, features = c("MGAM", "AGMO", "ANPEP", "SDSL", "AKR1E2", "DHDH", "ASS1", "FBP2", "SI", "RBP2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+#######################################
+
+
+
+FeaturePlot(sobj, features = c("PTPN11", "MAP2K1", "PLA2G1B", "C3", "SFRP5", "CEACAM20"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+FeaturePlot(sobj, features = c("SPDEF" ,"ENSSSCG00000026302" ,"HES1", "UBE2C", "SPINK4", "REG4"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap", label = FALSE) + ylab("UMAP 1") + xlab("UMAP 2") 
+
+
+FeaturePlot(sobj, features = c("LGR5" ,"CLC4A4" ,"LRMP", "GNG13", "MATK", "PTGS5", "TFF3"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap", label = FALSE) + ylab("UMAP 1") + xlab("UMAP 2") 
+FeaturePlot(sobj, features = c("EPHB3" ,"SOX9" ,"EPHB2", "NOTCH4", "DLL1", "DLL2", "DLL3", "DLL4"),cols = c("grey", "red"),  pt.size = 1, reduction = "umap", label = FALSE) + ylab("UMAP 1") + xlab("UMAP 2") 
+
+
+######## Transporters and Metabolic genes that are expressed #########
+
+
+# These are genes expressed in Enterocytes for sugar absorption:
+# (Glucose, fructose, mannose, galactose)
+# SLC2 transporter
+FeaturePlot(sobj, features = c("SLC2A2", "SLC2A5", "SLC2A7"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC5 transporter
+FeaturePlot(sobj, features = c("SLC5A1", "SLC5A6", "SLC5A8", "SLC5A12"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for amino acid absorption:
+# (Ala, Ser, Cys, Thr):
+# SLC1 transporter. 
+FeaturePlot(sobj, features = c("SLC1A1", "SLC1A5"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Leu, Val, Gly, Ala, Ser, Glu, Cys)
+# SLC1 transporter.
+FeaturePlot(sobj, features = c("SLC3A1", "SLC3A2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC7 transporter.
+FeaturePlot(sobj, features = c("SLC7A7", "SLC7A9"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# (GABA, norepinephrine, dopamine, serotonin, Gly, Leu, Iso, Val, Pro)
+# SLC6 transporter. 
+FeaturePlot(sobj, features = c("SLC6A4", "SLC6A6", 'SLC6A8', 'SLC6A9', 'SLC6A14', 'SLC6A19', 'SLC6A20'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Ala, Glu, Ser, Gly, Met, Thr)
+# SLC38 transporter.
+FeaturePlot(sobj, features = c('SLC38A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+#(Leu, Phe, Iso, Val, Me)
+# SLC43 transporter.
+FeaturePlot(sobj, features = c('SLC43A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Vitamins absorption:
+# (Folates (e.g., 5‐methyl tetrahydrofolate, 5‐formyl tetrahydrofolate), thiamine)
+# SLC19 transporter.
+FeaturePlot(sobj, features = c('SLC19A2', 'SLC19A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Ascorbate)
+# SLC23 transporter.
+FeaturePlot(sobj, features = c('SLC23A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Nucleotides/nucleosides absorption:
+# (Nucleotides/nucleosides)
+# SLC28 transporter.
+FeaturePlot(sobj, features = c('SLC28A1' , 'SLC28A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC29 transporter.
+
+##### These are genes expressed for Bicarbonate ions and protons absorption:
+#(Bicarbonate ions and protons)
+# SLC4 transporter. 
+FeaturePlot(sobj, features = c('SLC4A2', 'SLC4A4'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC9 transporter.
+FeaturePlot(sobj, features = c('SLC9A1', 'SLC9A2', 'SLC9A6'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# SLC26 transporter.
+FeaturePlot(sobj, features = c('SLC26A2', 'SLC26A3', 'SLC26A6'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Calsium (CA2+) absorption:
+# SLC8 transporter.
+FeaturePlot(sobj, features = c('SLC8A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Inorganic ions (CL-) absorption:
+# SLC12 transporter.
+FeaturePlot(sobj, features = c('SLC12A4', 'SLC12A6', 'SLC12A7'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Phosphate absorption:
+# (Sulfates, di‐ and tricarboxylates)
+# SLC13 transporter.
+FeaturePlot(sobj, features = c('SLC13A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Monocarboxylates)
+# SLC16 transporter. 
+FeaturePlot(sobj, features = c('SLC16A1', 'SLC16A3', 'SLC16A5'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Phosphate absorption:
+# (HPO4 2−, H2PO4 −)
+# SLC20 transporter.
+FeaturePlot(sobj, features = c('SLC20A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Inorganic phosphate)
+# SLC34 transporter.
+FeaturePlot(sobj, features = c('SLC34A3'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Trace metals absorption:
+# (Fe2+, Mn2+, Cu2+, Co2+, Cd2+, Ni2+, Pb2+)
+# SLC11 transporter. 
+FeaturePlot(sobj, features = c('SLC11A2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Zn2+)
+# SLC30 transporter.
+FeaturePlot(sobj, features = c('SLC30A1', 'SLC30A5', 'SLC30A10'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Cu2+)
+# SLC31 transporter.
+FeaturePlot(sobj, features = c('SLC31A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Zn2+)
+# SLC39 transporter. 
+FeaturePlot(sobj, features = c('SLC39A1', 'SLC39A4', 'SLC39A5', 'SLC39A6', 'SLC39A10'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# (Fe2+, Mn2+)
+# SLC40 transporter.
+FeaturePlot(sobj, features = c('SLC40A1'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Other organic compounds absorption:
+# (Bile acids, steroid hormones)
+# SLC10 transporter.
+FeaturePlot(sobj, features = c('SLC10A2', 'SLC10A5'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+##### These are genes expressed for Fatty Acid binding and absorption:
+# FABP
+FeaturePlot(sobj, features = c('FABP1', 'FABP2', 'FABP3', 'FABP6'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+# RBP2 Fat uptake
+FeaturePlot(sobj, features = c('RBP2'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# Fatty Acid uptake
+# SLC27 transporter.
+FeaturePlot(sobj, features = c('SLC27A2', 'SLC27A4'),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+# METABOLISM and CONVERTIONS
+FeaturePlot(sobj, features = c("LPL", "GPX2", "OTC", "SERHL2", "S100G", "TST", "SORD", "AGPS", "IDH3B", "GALM"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+FeaturePlot(sobj, features = c("MGAM", "ANPEP", "SDSL", "AKR1E2", "DHDH", "ASS1", "FBP1", "FBP2", "SI", "ACE2"),cols = c("grey", "red"),  pt.size = 2, reduction = "umap") + ylab("UMAP 1") + xlab("UMAP 2")
+
+
+
+### Transporters that are somewhat expressed ###
+### In Organoid vs Tissue scrip, we take a snippet of these that show a clear difference ###
+
+# (Glucose, fructose, mannose, galactose)
+"SLC2A2", "SLC2A5", "SLC2A7", "SLC5A1", "SLC5A6", "SLC5A8", "SLC5A12"
+# Amino Acid
+"SLC1A1", "SLC1A5", "SLC3A1", "SLC3A2", "SLC7A7", "SLC7A9"
+# Amino Acids and Hromones
+"SLC6A4", "SLC6A6", 'SLC6A8', 'SLC6A9', 'SLC6A14', 'SLC6A19', 'SLC6A20'
+"SLC38A2"
+"SLC43A2"
+# (Folates (e.g., 5‐methyl tetrahydrofolate, 5‐formyl tetrahydrofolate), thiamine, Ascorbate)
+'SLC19A2', 'SLC19A3'
+"SLC23A2"
+# (Nucleotides/nucleosides, Ascorbate)
+'SLC28A1' , 'SLC28A2'
+# Bicarbonate ions and protons
+'SLC4A2', 'SLC4A4'
+'SLC9A1', 'SLC9A2', 'SLC9A6'
+'SLC26A2', 'SLC26A3', 'SLC26A6'
+# CA2+
+"SLC8A1"
+# CL-
+'SLC12A4', 'SLC12A6', 'SLC12A7'
+# These are genes expressed for Proton absorption:
+# (H+/peptide cotransporter)
+"SLC15A1"
+# Phosphate absorption (Sulfates, di‐ and tricarboxylates, )
+"SLC13A1"
+# Phosphate absorption (Monocarboxylates)
+'SLC16A1', 'SLC16A3', 'SLC16A5'
+# Phosphate absorption  (HPO4 2−, H2PO4 −)
+"SLC20A1"
+# Phosphate absorption Inorganic phosphate
+"SLC34A3"
+# Trace metals absorption
+# Fe2+, Mn2+, Cu2+, Co2+, Cd2+, Ni2+, Pb2+
+"SLC11A2"
+'SLC30A1', 'SLC30A5', 'SLC30A10'
+'SLC31A1'
+'SLC39A1', 'SLC39A4', 'SLC39A5', 'SLC39A6', 'SLC39A10'
+'SLC40A1'
+# Other organic compounds absorption
+# Bile acids, steroid hormones
+'SLC10A2', 'SLC10A5'
+#Fatty Acid binding and absorption
+'SLC27A2', 'SLC27A4'
+'FABP1', 'FABP2', 'FABP3', 'FABP6'
+'RBP2'
+# Metabolism 1
+"LPL", "OTC", "SERHL2", "S100G", "SORD", "AGPS", "IDH3B", "GALM"
+# Metabolism 2
+"MGAM", "ANPEP", "SDSL", "AKR1E2", "DHDH", "ASS1", "FBP1", "FBP2",  "APOA1", "APOA4", "ACE2", "SI", "ALDOB"
+```
+
+At this point, we have classified our porcine ileum tissue scRNA-seq dataset and been able to classify clusters into the following cell lineages:
+
+* Endothelium                          (cluster 4)
+* Mesenchyme                           (cluster 6)
+* Prolific Stem/Prog                   (cluster 3)
+* EC Prog                              (cluster 5) 
+* PC                                   (cluster 9) 
+* GC                                   (Cluster 1)
+* Developing EC                        (cluster 0, 10)
+* Early EC                             (cluster 7)
+* Late EC                              (cluster 2)
+* EEC                                  (Cluster 11, 12)
+* TC                                   (Cluster 8)
+
+
+#################### Annotate/Heatmap/Dotplot of DGEs per cluster/cell type ####################
+
+
+```{r, annotation plot, fig.height=4, fig.width=4, echo=FALSE}
+bcs <- as.data.frame(colnames(sobj))
+colnames(bcs) <- 'barcode'
+bcs$cellID <- rep('_', nrow(bcs))
+df <- as.data.frame(sobj$seurat_clusters)
+# Cluster-based cell annotations not provided in the annotation .txt files:
+C4 <- rownames(subset(df, sobj$seurat_clusters %in% c("4")))
+C6 <- rownames(subset(df, sobj$seurat_clusters %in% c("6")))
+C3 <- rownames(subset(df, sobj$seurat_clusters %in% c("3")))
+C5 <- rownames(subset(df, sobj$seurat_clusters %in% c("5")))
+C9 <- rownames(subset(df, sobj$seurat_clusters %in% c("9")))
+C1 <- rownames(subset(df, sobj$seurat_clusters %in% c("1")))
+C0.10 <- rownames(subset(df, sobj$seurat_clusters %in% c("0", "10")))
+C7 <- rownames(subset(df, sobj$seurat_clusters %in% c("7")))
+C2 <- rownames(subset(df, sobj$seurat_clusters %in% c("2")))
+C11.12 <- rownames(subset(df, sobj$seurat_clusters %in% c("11", "12")))
+C8 <- rownames(subset(df, sobj$seurat_clusters %in% c("8")))
+# name the cells clusters 
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C4, 'Endothelium *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C6, 'Mesenchyme *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C3, 'Prolific Stem/Prog *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C5, 'EC Prog *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C9, 'PC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C1, 'GC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C0.10, 'Developing EC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C7, 'Early EC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C2, 'Late EC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C11.12, 'EEC *'))
+bcs <- bcs %>% mutate(cellID = replace(cellID, barcode %in% C8, 'TC *'))
+
+# update the metadatas slot
+rownames(bcs) <- bcs$barcode
+bcs$barcode <- NULL
+sobj <- AddMetaData(sobj, metadata = bcs) # add new annotations to meta data slot
+
+# plot new labeled cluster
+DimPlot(sobj, 
+        group.by = 'cellID', 
+        reduction = 'umap', label = TRUE) 
+DimPlot(sobj, reduction = 'umap', label = FALSE, pt.size = 0.5, group.by = 'cellID', label.size = 3, label.box = "TRUE") + ggtitle(project_name, subtitle = paste("Epithelial Cells (n = ", paste(dim(sobj)[2], ")", sep = ""))) + ylab("UMAP 1") + xlab("UMAP 2") + NoLegend()
+
+# Endothelium
+DimPlot(sobj, 
+        cells.highlight = C4, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Endothelium (n =", paste(length(C4), ")", sep = ""))) & NoAxes() & NoLegend()
+# Mesenchyme
+DimPlot(sobj, 
+        cells.highlight = C6, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Mesenchyme (n =", paste(length(C6), ")", sep = ""))) & NoAxes() & NoLegend()
+# Prolific Stem/Prog
+DimPlot(sobj, 
+        cells.highlight = C3, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Prolific Stem/Prog (n =", paste(length(C3), ")", sep = ""))) & NoAxes() & NoLegend()
+# EC Prog
+DimPlot(sobj, 
+        cells.highlight = C5, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("EC Prog (n =", paste(length(C5), ")", sep = ""))) & NoAxes() & NoLegend()
+# Paneth
+DimPlot(sobj, 
+        cells.highlight = C9, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("PC (n =", paste(length(C9), ")", sep = ""))) & NoAxes() & NoLegend()
+# Goblet
+DimPlot(sobj, 
+        cells.highlight = C1, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("GC (n =", paste(length(C1), ")", sep = ""))) & NoAxes() & NoLegend()
+# Developing EC
+DimPlot(sobj, 
+        cells.highlight = C0.10, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Developing EC (n =", paste(length(C0.10), ")", sep = ""))) & NoAxes() & NoLegend()
+# Early EC
+DimPlot(sobj, 
+        cells.highlight = C7, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Early EC (n =", paste(length(C7), ")", sep = ""))) & NoAxes() & NoLegend()
+# Late EC
+DimPlot(sobj, 
+        cells.highlight = C2, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("Late EC (n =", paste(length(C2), ")", sep = ""))) & NoAxes() & NoLegend()
+# Enteroendocrine
+DimPlot(sobj, 
+        cells.highlight = C11.12, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("EEC (n =", paste(length(C11.12), ")", sep = ""))) & NoAxes() & NoLegend()
+# Resting Cells 1
+DimPlot(sobj, 
+        cells.highlight = C8, 
+        cols.highlight = "blue", 
+        sizes.highlight = 1,
+        cols = "grey70", 
+        order = TRUE, 
+        reduction = 'umap') + ggtitle(project_name, subtitle = paste("TC (n =", paste(length(C8), ")", sep = ""))) & NoAxes() & NoLegend()
+
+DimPlot(sobj, reduction = 'umap', label = F, pt.size = 0.3, repel = T, group.by = "cellID") + ggtitle(project_name, subtitle = paste("Preleminary Clustering (n = ", paste(dim(sobj)[2], ")", sep = ""))) + ylab("UMAP 1") + xlab("UMAP 2") +  NoLegend()
+```
+
+
+# In the chuck below, we plot the proportion of cell types
+```{r cell proportion plot, fig.height=4, fig.width=8, echo=FALSE}
+#### Cell type proportions calculations ####
+
+# number of cells per cell type
+l_c1 <- length(C1) 
+l_c2 <- length(C2)
+l_c3 <- length(C3)
+l_c4 <- length(C4)
+l_c5 <- length(C5)
+l_c6 <- length(C6)
+l_c7 <- length(C7)
+l_c8 <- length(C8)
+l_c9 <- length(C9)
+l_c0.10 <- length(C0.10)
+l_c11.12 <- length(C11.12)
+
+# Plotting all cell types
+# making vectors of cells we want
+cell_type.size <- c(l_c3, l_c5, l_c0.10, l_c7, l_c2, l_c9, l_c1, l_c11.12, l_c8, l_c4, l_c6)
+cell_type.sum <- dim(sobj)[2]
+cell_type.sum.leveled <- c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme")
+# Making list and putting calculated proportion of cell types in it
+proportions_vec <- c() # make empty list to append in the loop below
+for (i in 1:length(x = cell_type.size)) {  # we loop in range of sample_name, because that determine the number of replicates we have
+  proportions <- cell_type.size[i] / cell_type.sum * 100
+  proportions_vec <- c(proportions_vec, proportions)
+}
+# Make data frame of cell type proportions
+data.proportions.tiss <- data.frame(cell_type.sum.leveled, proportions_vec)
+data.proportions.tiss
+
+# plot bars for cell type proportions
+ggplot(data.proportions.tiss, aes(x = factor(cell_type.sum.leveled, levels = cell_type.sum.leveled), y = proportions_vec)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.5, colour = "black", width = 0.8, fill="blue") + # position=position_dodge(.7) to distant two bars
+  theme_bw() + 
+  geom_text(aes(label = round(as.vector(data.proportions.tiss$proportions_vec), digits = 1)), position = position_dodge(width = 1),vjust = -0.5, size = 2.5) + # value above bar
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.9) # + theme(legend.position = c(0.1, 0.75))
+
+# Plotting summerzied cell types (USE THIS FOR COMPARISON TOP ORGANOID)
+cell_type.size <- c(l_c3, l_c5, (l_c0.10 + l_c7 + l_c2), l_c9, l_c1, l_c11.12, l_c8, l_c4, l_c6)
+cell_type.sum <- dim(sobj)[2]
+cell_type.sum.leveled <- c('Prolific Stem/Prog', 'EC Prog', "EC", 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme")
+# Making list and putting calculated proportion of cell types in it
+proportions_vec <- c() # make empty list to append in the loop below
+for (i in 1:length(x = cell_type.size)) {  # we loop in range of sample_name, because that determine the number of replicates we have
+  proportions <- cell_type.size[i] / cell_type.sum * 100
+  proportions_vec <- c(proportions_vec, proportions)
+}
+# Make data frame of cell type proportions
+data.proportions.tiss <- data.frame(cell_type.sum.leveled, proportions_vec)
+data.proportions.tiss
+
+# plot bars for cell type proportions
+ggplot(data.proportions.tiss, aes(x = factor(cell_type.sum.leveled, levels = cell_type.sum.leveled), y = proportions_vec)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.5, colour = "black", width = 0.8, fill="blue") + # position=position_dodge(.7) to distant two bars
+  theme_bw() + 
+  geom_text(aes(label = round(as.vector(data.proportions.tiss$proportions_vec), digits = 1)), position = position_dodge(width = 1),vjust = -0.5, size = 2.5) + # value above bar
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.9) # + theme(legend.position = c(0.1, 0.75))
+
+# Plotting summerzied cell types (epitheliu only)
+cell_type.size <- c(l_c3, l_c5,  (l_c0.10 + l_c7 + l_c2), (l_c9 + l_c1 + l_c11.12 + l_c8))
+cell_type.sum <- dim(sobj)[2]
+cell_type.sum.leveled <- c('Prolific Stem/Prog', 'EC Prog', "EC", 'Secretory Lineage')
+# Making list and putting calculated proportion of cell types in it
+proportions_vec <- c() # make empty list to append in the loop below
+for (i in 1:length(x = cell_type.size)) {  # we loop in range of sample_name, because that determine the number of replicates we have
+  proportions <- cell_type.size[i] / cell_type.sum * 100
+  proportions_vec <- c(proportions_vec, proportions)
+}
+# Make data frame of cell type proportions
+data.proportions.tiss <- data.frame(cell_type.sum.leveled, proportions_vec)
+data.proportions.tiss
+
+# plot bars for cell type proportions
+ggplot(data.proportions.tiss, aes(x = factor(cell_type.sum.leveled, levels = cell_type.sum.leveled), y = proportions_vec)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.5, colour = "black", width = 0.8, fill="blue") + # position=position_dodge(.7) to distant two bars
+  theme_bw() + 
+  geom_text(aes(label = round(as.vector(data.proportions.tiss$proportions_vec), digits = 1)), position = position_dodge(width = 1),vjust = -0.5, size = 2.5) + # value above bar
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8, colour = "black")) + 
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) + 
+  labs(x="Cell Type", y="Relative Proportion (%)") + scale_fill_grey() +
+  theme(aspect.ratio = 0.9) # + theme(legend.position = c(0.1, 0.75))
+```
+
+
+# In the chuck below we make heatmaps of DGE genes per cell type
+```{r clusterHeatmap-MT, fig.height=9, fig.width=14, echo=FALSE}
+Idents(sobj) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+# Make a vector of all relevant markers
+DGE_genes <- c("MKI67", "TK1", 'TOP2A', 'PLK1', "CCNB1", "HMGB2", "TPX2", "CDK1", "CDK4", "CDK6", "CENPF", "CDC20", "NUSAP1", "UBE2C", "ARID1A", "MSH6", "POLA1", "CDT1", "MCM2", "MCM4", "MCM5", "MCM6", "MCM7",'HES1', 'ELF3', "GADD45GIP1", "CDHR2", "CDHR5", 'HNF4A', 'HNF4G', 'NR5A2', "ACTB", "PLS1", "VIL1" ,"EPS8", "EZR", "MYO6", "MYO1A", "MYO1B", 'MYO5B', "MYO7B", "USH1C", 'BAIAP2L1', "KRT8", "KRT18", "KRT19", "KRT20", "DNMT", "CDH17", "EPCAM", "ANXA13", "SDCBP2", 'LAMA3', 'CDH1', 'LGALS3',"SLC2A2", "SLC1A1", "SLC6A4", "APOA4", "ACE2", "SI", "FABP1", 'FABP2', "FABP6", "HES6", "TFF3", "SPINK4", "REG4", "MUC2", 'LYZ', 'RETNLB', 'FCN2', "SOX9", "NEUROG3", "NEUROD1", "PAX4", "CHGA", "CHGB", "CCL5", "CD52", "EPHB6", "POU2F3", "VAV1", "VWF", "PECAM1", "COL3A1", "COL1A1", "ACTA2")
+
+# level the cellIDs by personal preference
+sobj$cellID <- factor(sobj$cellID, levels = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *', "Endothelium *", "Mesenchyme *"))
+sobj$cellID <- factor(sobj$cellID, levels = c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme"))
+
+# Make heatmap of DGEs
+DoHeatmap(subset(sobj, downsample = 200), features = DGE_genes, assay = "RNA", label = FALSE, group.by = 'cellID') + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red")) + 
+  theme(axis.text.y = element_text(face = 'italic')) #+ NoLegend()
+
+# Make Violinplot of RNA count, and MT
+VlnPlot(sobj, features = c("nCount_RNA"), pt.size = 0.5, group.by = 'cellID')
+VlnPlot(sobj, features = c("nFeature_RNA"), pt.size = 0.5, group.by = 'cellID')
+RidgePlot(sobj, features = c("nCount_RNA"), group.by = 'cellID', ncol = 1)
+
+# Build a phylogenetic tree, utilizing seurat_clusters as our groups and using the pre-determined significant number of PCs to specify the dimensionality of our data to use:
+phylogenetic <- BuildClusterTree(sobj, 
+                       dims = pc.dims, 
+                       assay = "PCA")
+PlotClusterTree(phylogenetic, edge.width = 3) # plot tree with node labels
+# Let's remove node labels and plot the tree again:
+data.tree <- Tool(object = phylogenetic, 
+                  slot = "BuildClusterTree") 
+ape::plot.phylo(x = data.tree, 
+                direction = "downwards", # plot the tree without node labels
+                edge.width = 1.5)
+# Let's reorder some of the branches while still maintaining our heirarchy:
+data.tree <- ape::rotateConstr(data.tree, c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *', "Endothelium *", "Mesenchyme *"))
+plot(data.tree, direction = 'downwards', edge.width = 1.5, font = 1)
+
+
+#DotPlot(sobj, features = DGE_genes, assay = "RNA", group.by = 'cellID') + scale_colour_gradient2(low = "blue", mid = "grey", high = "red") + RotatedAxis()
+```
+# In the chuck below we make heatmaps of MT genes per cell type
+```{r clusterHeatmap-MT, fig.height=3, fig.width=11, echo=FALSE}
+# Heatmap on mitochondroal genes
+MT_genes.ht = c("ND1", "ND2", "COX1", "COX2", "ATP8", "ATP6", "COX3", "ND3", "ND4L", "ND4", "ND5", "-ND6", "CYTB")
+
+DoHeatmap(subset(sobj, downsample = 400), features = MT_genes.ht, assay = "RNA", label = FALSE, group.by = 'cellID') + scale_fill_gradientn(colors = c("darkturquoise", "grey90", "red")) #+ NoLegend()
+
+#DotPlot(sobj, features = MT_genes.ht, assay = "RNA") + scale_colour_gradient2(low = "black", high = "red") + RotatedAxis()
+```
+
+# In the chuck below we make dotplots of DGE per cell type or subset
+```{r Dotplot, fig.height=17.2, fig.width=7, echo=FALSE}
+DotPlot(sobj, features = DGE_genes, assay = "RNA", scale = T, scale.by = 'size', group.by = "cellID") + 
+  scale_colour_gradient2(low = "blue", mid = "white", high = "red") +
+  RotatedAxis() + coord_flip() +
+  geom_point(aes(size=pct.exp), shape = 21, colour="black", stroke=0.7) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black")) + 
+  theme(axis.text.y = element_text(face = 'italic'))
+```
+
+
+
+#################### Cell cycle analysis of cluster/cell type ####################
+
+
+# In the chuck below we will look at cell cycle genes per cluster based on cell cylce score
+# Cell cycle estimate cell cycle phase of each cell and make a table to describe how many cells per phase.
+```{r cell-cycle, fig.height=3, fig.width=3.5, echo=FALSE}
+# As the s.genes/g2m.genes have been written for Human, we are supposed to change the organism here, i.e., we need to align all genes in Pig. 
+convertHumanGeneList <- function(x){
+  require("biomaRt")
+  human = useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://feb2021.archive.ensembl.org/") # oct 2022 is latest
+  mouse = useMart("ensembl", dataset = "sscrofa_gene_ensembl", host = "https://feb2021.archive.ensembl.org/")
+  genesV2 = getLDS(attributes = c("hgnc_symbol"), 
+                   filters = "hgnc_symbol", 
+                   values = x , 
+                   mart = human,
+                   attributesL = c("hgnc_symbol"), 
+                   martL = mouse, uniqueRows=T)
+  humanx <- unique(genesV2[, 2])
+  return(humanx)}
+# save the genes
+s_gene <- convertHumanGeneList(cc.genes$s.genes)
+g2m_gene <- convertHumanGeneList(cc.genes$g2m.genes)
+# Calculate the cellcycle score and plot
+sobj <- CellCycleScoring(sobj, s.features = s_gene, g2m.features = g2m_gene, set.ident = TRUE)
+DimPlot(sobj, reduction = "umap", pt.size = 0.5, group.by = 'Phase', cols = c('S' = 'orange', 'G2M' = 'darkgreen', 'G1' = 'red')) + ggtitle(project_name, subtitle = "Cell Cycle") + ylab("UMAP 1") + xlab("UMAP 2")
+table(sobj@meta.data$Phase)
+#cols.highlight = c("red","yellow","blue","green","darkorchid","orange","grey0","deeppink","gold4","darkgreen")
+```
+
+
+
+#################### Monocle trajectory ####################
+
+
+
+```{r trjectory, fig.height=5, fig.width=6, echo=FALSE} 
+# Lets first make a subset of the data based in epithelial cells only (without secretory):
+Idents(sobj) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+sobj <- subset(sobj, idents = c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *')) # only use this line if we want to remove the mesenchyme and endothelium
+
+####### STEP 1: obtaining the required formats from our Seurat object ####### 
+
+# Monocle3 requires cell_data_set object
+# So we convert seurat object to cell_data_set object for monocle3
+cds.obj <- as.cell_data_set(sobj)
+# Now we need cell Metadata for monocle3
+colData(cds.obj)
+# next is gene count matrix for monocle3
+fData(cds.obj)$gene_short_name <- rownames(fData(cds.obj)) # add gene names as column to fData(cds.obj)
+counts(cds.obj) # this is the count matrix
+  
+#######  Step 2: Cluster cells using the clustering info from our Seurat's UMAP) ####### 
+
+# We are going to use the clustering information we have
+# assign partitions
+reacreate.partition <- c(rep(1,length(cds.obj@colData@rownames)))
+names(reacreate.partition) <- cds.obj@colData@rownames
+reacreate.partition <- as.factor(reacreate.partition)
+
+cds.obj@clusters$UMAP$partitions <- reacreate.partition
+
+# Assign the cluster info from Seurat to Monocle cell_data_set
+sobj <- SetIdent(sobj, value = "cellID") # Change the ident of the cluster to cell-type or any other ID of interest
+list_cluster <- sobj@active.ident
+
+cds.obj@clusters$UMAP$clusters <- list_cluster
+# Assign UMAP coordinate from our Seurat object to the Monocle cell_data_set
+cds.obj@int_colData@listData$reducedDims$UMAP <- sobj@reductions$umap@cell.embeddings
+
+# Correct counts for cds.obj sobj to Counts/geometric_mean(total_Counts)
+# cds.obj <- as.cell_data_set(sobj, assay = "RNA") # Seurat Wrappers funtion
+cds.obj <- estimate_size_factors(cds.obj) #  Monocle3 function
+
+# plot normal annotated cluster in Monocle3 befroe trajection
+pre.trajectory.cluster <- plot_cells(cds.obj,
+           color_cells_by = "cluster",
+           label_groups_by_cluster = FALSE,
+           group_label_size = 0, cell_size = 0.8) + scale_color_manual(values = c('red', 'blue', 'green', 'maroon', 'yellow', 'grey', 'cyan', "darkorchid", "orange", "purple", 'black')) + theme(legend.position = "right")
+pre.trajectory.cluster 
+
+# Now we will run the learning Algorithm in Monocle to trajectory
+# We do not use partitions, because we all cells are connected as the organoid is relativley of low-complexity
+cds.obj <- learn_graph(cds.obj, use_partition = FALSE, learn_graph_control=list(ncenter=2200), close_loop = FALSE) #1100, #850, #398, #369, #367, #366, 
+
+#RGE_method = 'SimplePPT' (monocle 2 setting, not available here)
+
+# Visualize cluster an interjection 
+plot_cells(cds.obj,
+           color_cells_by = 'cluster',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 0,
+           trajectory_graph_segment_size = 1.1, 
+           trajectory_graph_color = "red") + ggtitle(project_name, subtitle = paste("Trajectory Inference")) + ylab("UMAP 1") + xlab("UMAP 2")
+
+# Select starting points based based on expectation, In this case the Stem/Prog in G2 phase
+cds.obj <- order_cells(cds.obj) 
+
+### Or make additional plots for manual starting node
+# plot the graph with pseudotime junctions and name of the junctions
+plot_cells(
+  cds = cds.obj,
+  color_cells_by = "cellID",
+  show_trajectory_graph = TRUE,
+  label_principal_points = TRUE, 
+) 
+# Manually picking starting node
+# Get the user starting node of choice and order the cells
+starting.node.of.choice <- 'Y_49' # get this from the plot above
+cds.obj <- order_cells(cds.obj, root_pr_nodes = starting.node.of.choice)
+
+# Plot Pseudotime
+plot_cells(cds.obj,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 0,
+           trajectory_graph_segment_size = 1.2, cell_size = 1.2,
+           trajectory_graph_color = "red") + ggtitle(project_name, subtitle = paste("Trajectory Inference")) + ylab("UMAP 1") + xlab("UMAP 2")
+
+# Add out pseudotime to seurat object that we will later use for co-expression module dynamics with pseudotime
+sobj$pseudotime <- pseudotime(cds.obj)
+sobj@meta.data # check if added and sorted correclty (stem cells must be lower values)
+pseudotime <- pseudotime(cds.obj)
+saveRDS(pseudotime, file = "pseudotime.Ileum.tissue.rds")
+
+# cells ordered by pseudotime in barplot
+pseudotime(cds.obj) # cell based on pseudotime
+cds.obj$monocle3_pseudotime <- pseudotime(cds.obj)
+data.pseudo <- as.data.frame(colData(cds.obj))
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(cellID, monocle3_pseudotime, median))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  labs(x="Pseudotime", y="")
+
+# Plot gene expression of interest as function of trajection subset
+# We start with checking how stem ells develop to mature enterocytes (to compare with organoid)
+Stem_to_tip_lineage_cells <- c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *', 'PC *', 'GC *', 'EEC *', 'TC *')
+stem.prog_genes <- c("MKI67", "TK1", "TOP2A", "HMGB2", "CENPF", "CDC20", "UBE2C")
+epithel.devl_genes <- c("ACTB", "PLS1", "VIL1" ,"EPS8", "EZR", "MYO6", "MYO5B")
+villus.tip_genes <- c("LAMA3" , "CDH1", "LGALS3", "LGALS1", "MMP7", "MMP13", "MSN")
+nut.abs_genes <- c("SLC13A1", "SLC39A5", "SLC26A6", "APOA4", "ACE2", "SI", "ALDOB") 
+nut.abs_genes2 <- c("SLC5A1", "SLC7A9", "SLC26A6", "SLC13A1", "SLC39A5", "FABP1", "RBP2")
+
+# Stem
+Stem_to_tip_lineage_cds <- cds.obj[rowData(cds.obj)$gene_short_name %in% stem.prog_genes, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells]
+plot_genes_in_pseudotime(Stem_to_tip_lineage_cds,
+                         color_cells_by="cellID", min_expr = 0, cell_size = 0.2) + NoLegend()
+# Epithelial development
+Stem_to_tip_lineage_cds <- cds.obj[rowData(cds.obj)$gene_short_name %in% epithel.devl_genes, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells]
+plot_genes_in_pseudotime(Stem_to_tip_lineage_cds,
+                         color_cells_by="cellID", min_expr = 0, cell_size = 0.2) + NoLegend()
+# Migration (villus tips)
+Stem_to_tip_lineage_cds <- cds.obj[rowData(cds.obj)$gene_short_name %in% villus.tip_genes, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells]
+plot_genes_in_pseudotime(Stem_to_tip_lineage_cds,
+                         color_cells_by="cellID", min_expr = 0, cell_size = 0.2) + NoLegend()
+# Nutrition absorptive genes
+Stem_to_tip_lineage_cds <- cds.obj[rowData(cds.obj)$gene_short_name %in% nut.abs_genes, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells]
+plot_genes_in_pseudotime(Stem_to_tip_lineage_cds,
+                         color_cells_by="cellID", min_expr = 0.2, cell_size = 0.2) + NoLegend()
+# Nutrition absorptive genes (expressed in org)
+Stem_to_tip_lineage_cds <- cds.obj[rowData(cds.obj)$gene_short_name %in% nut.abs_genes2, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells]
+plot_genes_in_pseudotime(Stem_to_tip_lineage_cds,
+                         color_cells_by="cellID", min_expr = 0.2, cell_size = 0.2) + NoLegend()
+
+# cells ordered by pseudotime for the given subset
+pseudotime(Stem_to_tip_lineage_cds) # cell based on pseudotime
+Stem_to_tip_lineage_cds$monocle3_pseudotime <- pseudotime(Stem_to_tip_lineage_cds)
+data.pseudo <- as.data.frame(colData(Stem_to_tip_lineage_cds))
+ggplot(data.pseudo, aes(monocle3_pseudotime, reorder(cellID, monocle3_pseudotime, median))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  labs(x="Pseudotime", y="")
+
+# Plot Pseudotime of Stem_to_tip
+Stem_to_tip_cds <- cds.obj[, colData(cds.obj)$cellID %in% Stem_to_tip_lineage_cells] # subset the cds
+# pseudotime
+plot_cells(Stem_to_tip_cds,
+           color_cells_by = 'pseudotime',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 0,
+           trajectory_graph_segment_size = 0, cell_size = 1.2,
+           trajectory_graph_color = "red") + ggtitle(project_name, subtitle = paste("Trajectory Inference")) + ylab("UMAP 1") + xlab("UMAP 2")
+# Celltype
+plot_cells(Stem_to_tip_cds,
+           color_cells_by = 'cellID',
+           label_groups_by_cluster = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           group_label_size = 0,
+           trajectory_graph_segment_size = 0, cell_size = 1.2,
+           trajectory_graph_color = "red") + ggtitle(project_name, subtitle = paste("Trajectory Inference")) + ylab("UMAP 1") + xlab("UMAP 2") 
+
+# Plot Separate pseudotime trajectories by the different mature cells
+# For Stem to Enterocytes
+sobj$EC_pseudotime <- ifelse(sobj$cellID %in% c('Prolific Stem/Prog *', 'EC Prog *', 'Developing EC *', 'Early EC *', 'Late EC *'), sobj$pseudotime, NA)
+# From stem to secretory cells
+sobj$SEC_pseudotime <- ifelse(sobj$cellID %in% c('Prolific Stem/Prog *', 'EC Prog *', 'PC *', 'GC *', 'EEC *', 'TC *'), sobj$pseudotime, NA)
+
+# Make the plotting:
+# Find the coordinates of the UMAP from the clustering
+sobj$UMAP1 <- sobj@reductions$umap@cell.embeddings[,1]
+sobj$UMAP2 <- sobj@reductions$umap@cell.embeddings[,2]
+
+# PLot EC
+p1 <- sobj@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=EC_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=1000, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=plasma(256), na.value='grey') +
+  umap_theme()
+# Plot SEC
+p2 <- sobj@meta.data %>%
+  ggplot(aes(x=UMAP1, y=UMAP2, color=SEC_pseudotime)) +
+  ggrastr::rasterise(geom_point(size=1), dpi=1000, scale=0.75) +
+  coord_equal() +
+  scale_color_gradientn(colors=viridis(256), na.value='grey') +
+  umap_theme()
+# Print plots
+print(p1)
+print(p2)
+
+
+# Now lets find genes that change as a function of pseudotime using genes that are differentially expressed on the different paths through the trajectory.
+# We test whether cells at similar positions on the trajectory have correlated expression using Moran's statistics.
+# Moran's statistics finds correlation coefficient that measures the overall spatial autocorrelation in the data set. It measures how one object is similar to others surrounding it.
+cds.obj_DEG <- graph_test(cds.obj, neighbor_graph="principal_graph", cores=4, method = c("Moran_I")) # Be careful with the number of cores selected, it literally SHITS on your computer! (slower with ARM64, so use X86 or Rosseta if using AMR64 Apple Computer) 
+cds.obj_DEG
+# Filter the DEG object based on passed test and P<0.05 
+cds.obj_DEG <- na.omit(cds.obj_DEG)
+cds.obj_DEG <- cds.obj_DEG[cds.obj_DEG$p_value < 0.05 & cds.obj_DEG$status == "OK", ]
+cds.obj_DEG
+# Sort based on morans_test_statistic (anything esle)
+# Morans test statistics is based on spetial correltation
+cds.obj_DEG <- cds.obj_DEG[order(-cds.obj_DEG$morans_test_statistic),] 
+
+# Extract all DEG SLC transporters as a function of pseudotime
+SLCs <- tbl_df(cbind(cds.obj_DEG=cds.obj_DEG, b=rownames(cds.obj_DEG)))%>%
+     filter(grepl("SLC", b))
+
+# lets save the SLCs to excell file
+if (dir.exists(file.path(parent_directory, "/Results/DE Markers"))) {
+  write_xlsx(data.frame(SLCs), paste(parent_directory, "/Results/DE Markers/SLC-transporters.xlsx", sep = ""))
+} else {
+  dir.create(file.path(parent_directory, "/Results/DE Markers"), recursive = TRUE)
+  write_xlsx(data.frame(SLCs), paste(parent_directory, "/Results/DE Markers/SLC-transporters.xlsx", sep = ""))
+}
+
+# plot DEGs in pseudo temproal order
+plot_cells(cds.obj, genes= c('SI'),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE, cell_size = 1.5)
+```
+
+
+#################### GO and KEGG on DGE genes ####################
+
+
+# In the two chuck below we will do some basic annotation on each cluster by performing a GO and KEGG enrichments analysis.
+# Here we will focus on upregulated genes first.
+```{r GO enrichment on the DE genes, fig.height=10, fig.width=11, echo=FALSE}
+# Connect to AnnotationHub
+ann.hub <- AnnotationHub()
+# Access the Ensembl database for pig
+ann.hub.database <- query(ann.hub, pattern = c("Sus scrofa", "EnsDb"), ignore.case = TRUE)
+# Acquire the latest annotation files
+id <- ann.hub.database %>%
+        mcols() %>%
+        rownames() %>%
+        tail(n = 1)
+# Downloading the Ensembldb database
+ensembl.database <- ann.hub[[id]]
+# Extract gene-level information from the database
+annotations <- genes(ensembl.database, 
+                     return.type = "data.frame")
+# Select annotations of interest
+annotations <- annotations %>%
+        dplyr::select(gene_id, gene_name, seq_name, gene_biotype, description)
+
+Idents(sobj) <- "cellID" # Set the ident of the metadata to the one of interest (in this case our cellIDs)
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+sobj.markers <- FindAllMarkers(sobj, only.pos = TRUE, min.pct = 0.15, logfc.threshold = 0.1)
+sobj.markers <- subset(sobj.markers, p_val_adj < 0.05) # make sure the adjusted p-values are still < 0.05 since some genes in DE list have p_val_adj > 0.05
+markers <- sobj.markers %>% group_by(cluster) %>% slice_max(n = dim(sobj)[1], order_by = avg_log2FC) # 200 for human and all for pig #dim(sobj)[1]
+features <- annotations[c("gene_biotype", "description", "gene_name")] # subset only the columns of gene symbols, Ensembl IDs, and the names used for analysis 
+markers <- merge(markers,
+              features, 
+              by.x = "gene", 
+              by.y = "gene_name") # merge the DE gene lists with the additional gene information
+
+# Put markers per cluste rin data.frame and order them
+markers <- markers[order(markers$cluster, markers$p_val_adj),] # reorder by lowest to highest p-value within each cluster
+#view(markers)
+
+# Extract op genes of interest
+#sobj.markers %>% group_by(cluster) %>% top_n(n = 100, wt = avg_log2FC) -> top100
+#top100 <- top100[order(top100$cluster, top100$p_val_adj),] 
+#top100
+
+#Extract the markers that positive expression per cluster
+GO.KEGG.sampels.pos <- markers[,1:7]   # extract the top 30 genes and clusters containing only the positive Log2FC
+GO.KEGG.sampels.pos <- split(GO.KEGG.sampels.pos$gene, GO.KEGG.sampels.pos$cluster)
+
+# order of the cells
+sobj$cellID <- factor(sobj$cellID, levels = c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme"))
+levels = c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme")
+
+# Prepare the GO KEGG analysis for the DE up-regulated markers using the Human database
+for (i in 1: length(GO.KEGG.sampels.pos)) {
+  GO.KEGG.sampels.pos[[i]] = bitr(GO.KEGG.sampels.pos[[i]], fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Hs.eg.db") # convert genes to human org.Hs.eg.db 
+}
+# do the same here, a line like below for each cluster
+genelist.all.pos <- list()
+for (i in 1: length(GO.KEGG.sampels.pos)) {
+  genelist.all.pos[levels[i]] <- list(GO.KEGG.sampels.pos[[i]]$ENTREZID)
+}
+
+# Pig DATABSE
+# Do the GO and KEGG on biological process on DE up-regulated markers and plot top 2 per cell type
+#GOclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Ss.eg.db", ont = 'BP', pvalueCutoff  = 0.05)
+#dotplot(GOclusterplot.all.pos, showCategory=2) + ggtitle(paste("GO: Up-regulated Markers", project_name, sep = " - ")) + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black")) + 
+#  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 14, colour = "black")) #+ coord_flip()
+
+# HUMANS DATABASE GO
+GOclusterplot.all.pos.hs <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichGO", OrgDb = "org.Hs.eg.db", ont = 'BP', pvalueCutoff  = 0.05)
+dotplot(GOclusterplot.all.pos.hs, showCategory=3) + ggtitle(paste("GO: Up-regulated Markers", project_name, sep = " - ")) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black")) +theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 14, colour = "black")) #+ coord_flip()
+
+
+# No we generate a dotplot of GO pathways that we think makes sense within the statistically significant once.
+# Before we only plotted the top 2, but these are not always the most relevant.
+GO.table <- GOclusterplot.all.pos.hs@compareClusterResult # we save the result obtained from the GO enrichment in a new list of vectors
+#GO.table # take a look for a second to see the order of the columns. 
+#colnames(GO.table) # check column names that we will use to extract the data of interest
+GO.table$p.adjust <- as.numeric(GO.table$p.adjust) # lets make the adjusted p-value numeric, so that we can use it in the legend of the final plot
+GO.table$GeneRatio <- as.numeric(sapply(strsplit(GO.table$GeneRatio, "/"), function(x) as.numeric(x[1])/as.numeric(x[2])))  # lets make the generatio numeric, so that we can use it in the legend of the final plot. since its a string of ratio (e.g. 20/70), we have to splot by "/" and divide
+# By manually analyzing the table, we will extract the index of the GO terms and put the top 3 per cluster in a table
+view(GO.table)
+# Pick the GO terms of interest (FULL) in the order of the cells
+GO.terms <- c(paste(GO.table$Description[2], GO.table$ID[2], sep = " - "), paste(GO.table$Description[4], GO.table$ID[4], sep = " - "), paste(GO.table$Description[7], GO.table$ID[7], sep = " - "), paste(GO.table$Description[9], GO.table$ID[9], sep = " - "), paste(GO.table$Description[14], GO.table$ID[14], sep = " - "), paste(GO.table$Description[681], GO.table$ID[681], sep = " - "), paste(GO.table$Description[1133], GO.table$ID[1133], sep = " - "), paste(GO.table$Description[1140], GO.table$ID[1140], sep = " - "), paste(GO.table$Description[1144], GO.table$ID[1144], sep = " - "), paste(GO.table$Description[1145], GO.table$ID[1145], sep = " - "), paste(GO.table$Description[1146], GO.table$ID[1146], sep = " - "), paste(GO.table$Description[1156], GO.table$ID[1156], sep = " - "), paste(GO.table$Description[1169], GO.table$ID[1169], sep = " - "), paste(GO.table$Description[1171], GO.table$ID[1171], sep = " - "), paste(GO.table$Description[1181], GO.table$ID[1181], sep = " - "), paste(GO.table$Description[1224], GO.table$ID[1224], sep = " - "), paste(GO.table$Description[1229], GO.table$ID[1229], sep = " - "), paste(GO.table$Description[1300], GO.table$ID[1300], sep = " - "), paste(GO.table$Description[1308], GO.table$ID[1308], sep = " - "), paste(GO.table$Description[1316], GO.table$ID[1316], sep = " - "), paste(GO.table$Description[1323], GO.table$ID[1323], sep = " - "), paste(GO.table$Description[1334], GO.table$ID[1334], sep = " - "), paste(GO.table$Description[1336], GO.table$ID[1336], sep = " - "), paste(GO.table$Description[1341], GO.table$ID[1341], sep = " - "), paste(GO.table$Description[1342], GO.table$ID[1342], sep = " - "), paste(GO.table$Description[1348], GO.table$ID[1348], sep = " - "), paste(GO.table$Description[1352], GO.table$ID[1352], sep = " - "), paste(GO.table$Description[1362], GO.table$ID[1362], sep = " - "), paste(GO.table$Description[1373], GO.table$ID[1373], sep = " - "), paste(GO.table$Description[1392], GO.table$ID[1392], sep = " - "), paste(GO.table$Description[1484], GO.table$ID[1484], sep = " - "), paste(GO.table$Description[1548], GO.table$ID[1548], sep = " - "), paste(GO.table$Description[1554], GO.table$ID[1554], sep = " - "),  paste(GO.table$Description[1566], GO.table$ID[1566], sep = " - "), paste(GO.table$Description[1629], GO.table$ID[1629], sep = " - "), paste(GO.table$Description[1679], GO.table$ID[1679], sep = " - "), paste(GO.table$Description[1715], GO.table$ID[1715], sep = " - "), paste(GO.table$Description[1837], GO.table$ID[1837], sep = " - "), paste(GO.table$Description[1838], GO.table$ID[1838], sep = " - "), paste(GO.table$Description[1843], GO.table$ID[1843], sep = " - "), paste(GO.table$Description[1886], GO.table$ID[1886], sep = " - "), paste(GO.table$Description[1904], GO.table$ID[1904], sep = " - "), paste(GO.table$Description[1916], GO.table$ID[1916], sep = " - "), paste(GO.table$Description[1917], GO.table$ID[1917], sep = " - "), paste(GO.table$Description[2132], GO.table$ID[2132], sep = " - "), paste(GO.table$Description[2139], GO.table$ID[2139], sep = " - "), paste(GO.table$Description[2141], GO.table$ID[2141], sep = " - "), paste(GO.table$Description[2834], GO.table$ID[2834], sep = " - "), paste(GO.table$Description[2841], GO.table$ID[2841], sep = " - "), paste(GO.table$Description[2841], GO.table$ID[2841], sep = " - "), paste(GO.table$Description[2861], GO.table$ID[2861]))
+
+# Pic the GO terms of interest (index) (for filtering the full table)
+GO.terms.index <- c(paste(GO.table$Description[2]), paste(GO.table$Description[4]), paste(GO.table$Description[7]), paste(GO.table$Description[9]), paste(GO.table$Description[14]), paste(GO.table$Description[681]), paste(GO.table$Description[1133]), paste(GO.table$Description[1140]), paste(GO.table$Description[1144]), paste(GO.table$Description[1145]), paste(GO.table$Description[1146]), paste(GO.table$Description[1156]), paste(GO.table$Description[1169]), paste(GO.table$Description[1171]), paste(GO.table$Description[1181]), paste(GO.table$Description[1224]), paste(GO.table$Description[1229]), paste(GO.table$Description[1300]), paste(GO.table$Description[1308]), paste(GO.table$Description[1316]), paste(GO.table$Description[1323]), paste(GO.table$Description[1334]), paste(GO.table$Description[1336]), paste(GO.table$Description[1341]), paste(GO.table$Description[1342]), paste(GO.table$Description[1348]), paste(GO.table$Description[1352]), paste(GO.table$Description[1362]), paste(GO.table$Description[1373]), paste(GO.table$Description[1392]), paste(GO.table$Description[1484]), paste(GO.table$Description[1548]), paste(GO.table$Description[1554]), paste(GO.table$Description[1566]), paste(GO.table$Description[1629]), paste(GO.table$Description[1679]), paste(GO.table$Description[1715]), paste(GO.table$Description[1837]), paste(GO.table$Description[1838]), paste(GO.table$Description[1843]), paste(GO.table$Description[1886]), paste(GO.table$Description[1904]), paste(GO.table$Description[1916]), paste(GO.table$Description[1917]), paste(GO.table$Description[2132]),paste(GO.table$Description[2139]), paste(GO.table$Description[2141]), paste(GO.table$Description[2834]), paste(GO.table$Description[2841]), paste(GO.table$Description[2841]), paste(GO.table$Description[2861]))
+
+# Now only keep the GO terms of interest from the full data
+GO.table <- GO.table[GO.table$Description %in% GO.terms.index, ]
+# Order of the cells types
+sobj$cellID <- factor(sobj$cellID, levels = c('Prolific Stem/Prog', 'EC Prog', 'Developing EC', 'Early EC', 'Late EC', 'PC', 'GC', 'EEC', 'TC', "Endothelium", "Mesenchyme"))
+# Now combine the GO term ID and Description in new column to use for plotting
+GO.table$term <- paste(GO.table$Description, " - ", GO.table$ID)
+
+# Dotplot the GO terms of interest
+ggplot(GO.table) +
+  geom_point(aes(x = reorder(term, p.adjust, decreasing = F), 
+                 y = Cluster,
+                 size = GeneRatio,
+                 fill = p.adjust), colour="black", shape=21, stroke = 0.5) +  #colour="black", shape=21, stroke = 0.5
+  theme_bw() +
+  scale_color_gradient(low = 'red', high = 'blue') +
+  coord_flip() + coord_flip() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12, colour = "black")) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 12, colour = "black")) 
+```
+
+```{r KEGG enrichment on the DE genes, fig.height=12, fig.width=15, echo=FALSE, echo=FALSE}
+# PIG DATABSE
+# KEGG
+# suported orgnaism can ben found here: https://www.genome.jp/kegg/catalog/org_list.html
+#KEGGclusterplot.all.pos <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "ssc", pvalueCutoff  = 0.05)
+#dotplot(KEGGclusterplot.all.pos, showCategory=1) + ggtitle(paste("KEGG: Up-regulated Markers", project_name, sep = " - ")) + theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14, colour = "black"))  #+ coord_flip()
+
+# HUMANS DATABASE
+# KEGG
+KEGGclusterplot.all.pos.hs <- compareCluster(geneCluster = genelist.all.pos, fun = "enrichKEGG", organism = "hsa", pvalueCutoff  = 0.05,)
+dotplot(KEGGclusterplot.all.pos.hs,  showCategory=1) + ggtitle("KEGG - Hs: Up-regulated Markers - Pig Ileum Organoid") 
+```
+
+
+#################### Saving Seurat OBJ ####################
+
+
+# In the chuck below, we save our Seurat object
+```{r saving Seurat object, echo=FALSE}
+# Add new metadata containing cell origin (this will be used for itegration and comparison to tissue)
+n.cells <- length(sobj@meta.data$seurat_clusters)
+orig.cells <- rep("Ileum Tiss", n.cells)
+sobj <- AddMetaData(object = sobj, metadata = orig.cells, col.name = 'cell.origin')
+
+# Save the Seurat object
+SaveH5Seurat(sobj, overwrite = TRUE, filename = "ileum_pig_tiss(WIERDA).all")
+
+# Make backup and keep this!
+sobj2 <- sobj
+
+sobj3 <- sobj
+
+```
