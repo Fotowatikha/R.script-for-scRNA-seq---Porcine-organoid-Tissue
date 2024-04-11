@@ -1,34 +1,13 @@
-# Single-Cell Pre-Processing Script
+R.script-for-scRNA-seq---Porcine-organoid-Tissue
 
-Now considering that the emergence of scRNA-seq techniques provides the framework to study gene expression variability in organoids or tissue of interest, the pre-processing of high dimensional RNA-seq data also becomes an important topic. To this day, droplet-based technologies remain the technique of choice when it comes to capturing and sequencing a large number of individual cells. This method essentially barcodes single cells and tags each transcript with a unique molecular identifier (UMI) within individual droplets, which can significantly increase the throughput up to 10,000 cells per analysis. However, this technique is not free of noise, and one must carefully pre-process the data before any unbiased downstream analysis can be caried out. 
+This repository contains all the R scripts (RMD format) that were created and used for the analysis of single-cell RNA-sequencing data throughout this MSc thesis.
+By consider the gene count matrices as the starting point after mapping reads in CellRanger, script for quality control and pre-processing is provided so that it can run on your local system. (The full pipeline will published in a separate public repository).
+Scripts for the analysis of the data (ileum, organoid) are contained within chunks, with each chunk carrying out a different task (e.g. cell-cell communication network, clustering, GO, trajectory analysis and more).
+Note that the scripts are heavily personalized (for my local system) and specialized towards the analysis of the data used for this thesis. While most chunks and lines are documented, I do not recommend using them to reproduce the results in a different animal/tissue/organoid.
+General purpose scripts to perform the same analysis in different animal/tissue/organoid will be published on a later date (in the same repository). The chunks will be replaced with separate R scripts for every type of analysis.
+For some analysis (WGCNA and CellChat) previous versions of Seurat has been used. These codes will be updated to be compatible with the latest version on a later date. All the other codes have been rewritten to be compatible with Seurat_v5, however you will find some lines that were used for the previous version. These lines have been greyed-out, so you can ignore them.
+(THIS README FILE WILL CHANGE ONCE ALL THE GENERAL-PURPOSE SCRIPTS ARE UPLOADED. EVERYTHING ELSE AS IS NOW)
 
-**Here, I will provide you with all the necessary information on how to use my single-cell pre-processing script, either on your local system or on the HPC. I will also provide you with the information you need for a Snakemake implementation.**
+If you are the next student doing a thesis at ABG on single-cell data, feel free to contact me (https://twitter.com/H_Fotowaikha) if you need assistance with the existing code that was used for this analysis.
 
-## About
-
-By consider the gene count matrices as the starting point after mapping reads to the reference, the major steps in this pre-processing is to: (1) Provide the user with quality control (QC) plots to gain insight on the overall quality of the cells prior to any extensive filtering; (2) Correcting the data from cell-free ambient RNA; (3) Extensive filtering to remove droplets that are unlikely to represent intact individual cells; (4) Removal of droplets that violate the assumption for containing one cell; (5) Provide the user with QC plots to gain insight on the quality of the data post-filtering.
-
-
-**More detail each step and what to expect from the output is provided below. For each sept, example pictures are provided and how you should read them.**
-
-## How run it on the HPC (no Conda) or on your local system
-
-Now provided that I was unsuccessful in implementing the pre-processing script with Cellranger in a Snakefile that is compatible with the Conda environment (more on that later), i will explain to you how to run it outside a Snakefile.
-
-On your local system you can run the pre-processing.Rmd script on **Rstudio** or render it as an Rscript on your terminal using by running: 
-
-```sh
-Rscript -e "rmarkdown::render('pre-processing.Rmd’)
-```
-
-The most important part here is that you will be able to specify the correct paths to the output folder provided by Cellranger counts. For the sake of clarity (also for Snakemake), at the start of the code, I have made separate chuck where all the user parameters can be adjusted. The advantages of this are that you no longer have to dig into code to enter the correct parameters. Likewise, you don’t have to dig into the code to setup the parameters in your `config.yaml` for Snakemake. I will explain the parameters in-depth later on, but it is not necessary to insert any parameters as I have already implemented an automated filtering that has proven to works very well with single-cell and single-nuclei datasets from porcine ileum, colon and organoids.
-
-The two paths that you need to specify are the parent_directory and the sample_path. 
-
-An example of a path looks like this:
-`~/user/scRNA-intestine/sample1/outs`
-
-When you run Cellranger counts, you have to specify the `--id`, such as `--id=sample1`. When finished running, Cellranger will put all the output files in that specific folder called `sample1`. 
-So in this case the directories will look as follows: `parent_directory = "~/user/scRNA-intestine"` and the `sample_path = c("sample1")`. You type it down exactly as given in this example, so don’t put additional `/` at the start or the end. That’s it! Now you can run it on your local system after you install all the packages as specified in the first chunk of the code. So in case you have two samples, or three within the `parent_directory`, the only thing you have to do is to change is the sample_path to `sample_path = c("sample1", "sample2", "sample3)`. Boom! now you can pre-process multiple samples at the same time. To make sure your graphs in the output are labaled correctly, make sure to put the name of your experiments in the parameter called `sample_names`. Lke this `sample_names = c("brain", "eyes", "intestine")`. Now all your graphs will have the correct headers in the output.
-
-But there is a catch, by running multiple samples, you are forced to use the same filtering parameters for all your samples. As of now, there is not option to pick different parameters for every sample. So it is recommended to use this pre-processing scripts for one sample at a time.
+I do recommend to stay away from Seurat if you want to save yourself some sleepless nights during your thesis. The developers love to implement meaningless updates that will move your count matrices in layers. You can of course parse things manually, but that will take you a lot of time. I recommend you to use Scanpy from the start, unless some package you need is not available in Python.
