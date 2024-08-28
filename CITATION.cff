@@ -3,7 +3,7 @@ message: "If you use analytical tools, you dont have to cite anything. Just enjo
 authors:
   - family-names: Fotowatikha
     given-names: Hamid
-title: "MyProject: Analytical Tools for Single Cell Omics Data; hdWGCNA, CellChat, Monocle3, BisqueRNA, Genera-Seurat"
+title: "MyProject: Analytical Tools for Single Cell Omics Data; hdWGCNA, CellChat, Monocle3, BisqueRNA, General-Seurat"
 version: "1.0"
-url: "https://github.com/Fotowatikha/sc-sn-RNA-seq-Pre-Processing-Pipeline"
+url: "https://github.com/Fotowatikha/R.script-for-scRNA-seq---Porcine-organoid-Tissue"
 date-released: 2024-02-01
