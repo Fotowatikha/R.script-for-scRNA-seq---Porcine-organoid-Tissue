@@ -1,4 +1,4 @@
-R.script-for-scRNA-seq---Porcine-organoid-Tissue.
+R.script-for-scRNA-seq---Porcine-organoid-Tissue
 
 This repository contains all the R scripts (RMD format) that were created and used for the analysis of single-cell RNA-sequencing data throughout this MSc thesis.
 By consider the gene count matrices as the starting point after mapping reads in CellRanger, script for quality control and pre-processing is provided so that it can run on your local system. (The full pipeline will published in a separate public repository).
